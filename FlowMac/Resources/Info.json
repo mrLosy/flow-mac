@@ -1,0 +1,8 @@
+{
+  "bundleIdentifier": "com.flowmac.app",
+  "bundleName": "Flow Mac",
+  "bundleVersion": "1.0.0",
+  "bundleShortVersion": "1.0",
+  "minimumOSVersion": "13.0",
+  "deploymentTarget": "13.0"
+}
