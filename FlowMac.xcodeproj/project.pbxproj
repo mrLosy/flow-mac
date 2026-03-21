@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
         00000001 /* FlowMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000101 /* FlowMacApp.swift */; };
-        00000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000102 /* AppDelegate.swift */; };
         00000003 /* AudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000201 /* AudioEngine.swift */; };
         00000004 /* AudioCaptureServiceProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000202 /* AudioCaptureServiceProtocol.swift */; };
         00000005 /* RecognitionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000203 /* RecognitionService.swift */; };
@@ -26,7 +25,6 @@
 /* Begin PBXFileReference section */
         000000F0 /* FlowMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FlowMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
         00000101 /* FlowMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowMacApp.swift; sourceTree = "<group>"; };
-        00000102 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
         00000201 /* AudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEngine.swift; sourceTree = "<group>"; };
         00000202 /* AudioCaptureServiceProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioCaptureServiceProtocol.swift; sourceTree = "<group>"; };
         00000203 /* RecognitionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecognitionService.swift; sourceTree = "<group>"; };
@@ -77,7 +75,6 @@
             isa = PBXGroup;
             children = (
                 00000101 /* FlowMacApp.swift */,
-                00000102 /* AppDelegate.swift */,
             );
             path = App;
             sourceTree = "<group>";
@@ -242,7 +239,6 @@
             buildActionMask = 2147483647;
             files = (
                 00000001 /* FlowMacApp.swift in Sources */,
-                00000002 /* AppDelegate.swift in Sources */,
                 00000003 /* AudioEngine.swift in Sources */,
                 00000004 /* AudioCaptureServiceProtocol.swift in Sources */,
                 00000005 /* RecognitionService.swift in Sources */,
