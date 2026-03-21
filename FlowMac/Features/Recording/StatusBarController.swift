@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 /// Controller for the status bar menu
 class StatusBarController: ObservableObject {
@@ -11,6 +12,8 @@ class StatusBarController: ObservableObject {
     private var textInjector: TextInjector
     
     @Published var isRecording = false
+    
+    private var cancellables = Set<AnyCancellable>()
     
     init(
         audioEngine: AudioEngine,
@@ -42,21 +45,22 @@ class StatusBarController: ObservableObject {
     
     private func setupPopover() {
         let popover = NSPopover()
-        popover.contentSize = NSSize(width: 280, height: 350)
+        popover.contentSize = NSSize(width: 300, height: 400)
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(
-            rootView: StatusBarMenuView(
-                audioEngine: audioEngine,
-                recognitionService: recognitionService,
-                textInjector: textInjector,
-                openSettings: { [weak self] in
-                    self?.openSettings()
-                },
-                quitApp: { [weak self] in
-                    self?.quitApp()
-                }
-            )
+        
+        let contentView = StatusBarMenuView(
+            audioEngine: audioEngine,
+            recognitionService: recognitionService,
+            textInjector: textInjector,
+            openSettings: { [weak self] in
+                self?.openSettings()
+            },
+            quitApp: { [weak self] in
+                self?.quitApp()
+            }
         )
+        
+        popover.contentViewController = NSHostingController(rootView: contentView)
         self.popover = popover
     }
     
@@ -70,8 +74,6 @@ class StatusBarController: ObservableObject {
             }
             .store(in: &cancellables)
     }
-    
-    private var cancellables = Set<AnyCancellable>()
     
     private func updateMenuIcon() {
         DispatchQueue.main.async { [weak self] in
@@ -147,7 +149,6 @@ class StatusBarController: ObservableObject {
     }
     
     @objc private func toggleRecording() {
-        // This will be handled by HotkeyManager
         NotificationCenter.default.post(name: .toggleRecording, object: nil)
     }
     

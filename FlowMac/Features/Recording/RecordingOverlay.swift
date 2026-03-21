@@ -2,13 +2,15 @@ import SwiftUI
 import AppKit
 import Combine
 
-/// Floating overlay window showing recording status
+/// Floating overlay window showing recording status with audio visualization
 class RecordingOverlayWindow: NSObject, ObservableObject {
     private var window: NSWindow?
     private var hostingView: NSHostingView<RecordingOverlayView>?
     
     @Published var audioLevel: Float = 0.0
     @Published var isRecording = false
+    
+    private var cancellables = Set<AnyCancellable>()
     
     override init() {
         super.init()
@@ -39,16 +41,22 @@ class RecordingOverlayWindow: NSObject, ObservableObject {
         window?.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
         // Position window at center of screen
-        if let screenFrame = NSScreen.main?.visibleFrame {
-            let windowSize: CGFloat = 200
-            let x = screenFrame.midX - windowSize / 2
-            let y = screenFrame.midY - windowSize / 2
-            window?.setFrameOrigin(NSPoint(x: x, y: y))
-        }
+        positionWindow()
+    }
+    
+    private func positionWindow() {
+        guard let screenFrame = NSScreen.main?.visibleFrame else { return }
+        
+        let windowSize: CGFloat = 200
+        let x = screenFrame.midX - windowSize / 2
+        let y = screenFrame.midY - windowSize / 2
+        
+        window?.setFrame(NSRect(x: x, y: y, width: windowSize, height: windowSize), display: false)
     }
     
     func show() {
         DispatchQueue.main.async { [weak self] in
+            self?.positionWindow() // Recenter on current screen
             self?.window?.orderFrontRegardless()
             self?.isRecording = true
         }
@@ -58,6 +66,7 @@ class RecordingOverlayWindow: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.window?.orderOut(nil)
             self?.isRecording = false
+            self?.audioLevel = 0.0
         }
     }
     
@@ -75,7 +84,8 @@ struct RecordingOverlayView: View {
     @Binding var isRecording: Bool
     
     @State private var pulseScale: CGFloat = 1.0
-    @State private var pulseOpacity: Double = 0.5
+    @State private var pulseOpacity: Double = 0.6
+    @State private var rotation: Double = 0
     
     var body: some View {
         ZStack {
@@ -83,76 +93,140 @@ struct RecordingOverlayView: View {
             VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
                 .clipShape(Circle())
             
-            // Pulsing ring
+            // Outer pulsing ring
             Circle()
-                .stroke(Color.red.opacity(0.3), lineWidth: 2)
+                .stroke(
+                    LinearGradient(
+                        colors: [.red.opacity(0.4), .orange.opacity(0.2)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 3
+                )
                 .scaleEffect(pulseScale)
                 .opacity(pulseOpacity)
                 .animation(
-                    .easeInOut(duration: 1.0)
+                    .easeInOut(duration: 1.2)
                     .repeatForever(autoreverses: true),
                     value: pulseScale
                 )
             
-            // Audio level rings
-            ForEach(0..<3) { index in
+            // Middle pulsing ring
+            Circle()
+                .stroke(Color.red.opacity(0.15), lineWidth: 8)
+                .scaleEffect(pulseScale * 0.85)
+                .opacity(pulseOpacity * 0.7)
+            
+            // Audio level rings - dynamic visualization
+            ForEach(0..<5) { index in
                 Circle()
                     .stroke(
-                        Color.red.opacity(0.3 - Double(index) * 0.1),
-                        lineWidth: 2
+                        audioLevelColor(for: index)
+                            .opacity(0.3 + Double(index) * 0.1),
+                        lineWidth: 2 + CGFloat(index) * 0.5
                     )
                     .scaleEffect(scaleForRing(index))
-                    .animation(.easeOut(duration: 0.1), value: audioLevel)
+                    .animation(.easeOut(duration: 0.08), value: audioLevel)
             }
             
-            // Center icon
+            // Center main circle with gradient
             ZStack {
                 Circle()
-                    .fill(Color.red)
-                    .frame(width: 60, height: 60)
+                    .fill(
+                        RadialGradient(
+                            colors: [.red, .red.opacity(0.8)],
+                            center: .center,
+                            startRadius: 20,
+                            endRadius: 40
+                        )
+                    )
+                    .frame(width: 80, height: 80)
+                    .shadow(color: .red.opacity(0.4), radius: 20, x: 0, y: 0)
                 
+                // Microphone icon
                 Image(systemName: "mic.fill")
-                    .font(.system(size: 30))
+                    .font(.system(size: 36, weight: .semibold))
                     .foregroundColor(.white)
+                    .symbolEffect(.pulse, isActive: isRecording)
             }
             
-            // Recording indicator
+            // Recording indicator pill at bottom
             VStack {
                 Spacer()
                 
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(Color.red)
-                        .frame(width: 8, height: 8)
-                        .animation(
-                            .easeInOut(duration: 0.8)
-                            .repeatForever(autoreverses: true),
-                            value: isRecording
-                        )
+                HStack(spacing: 6) {
+                    // Animated recording dot
+                    ZStack {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 8, height: 8)
+                            
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 8, height: 8)
+                            .opacity(pulseOpacity)
+                            .scaleEffect(pulseScale)
+                    }
                     
                     Text("Recording...")
-                        .font(.caption)
-                        .fontWeight(.medium)
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.white)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.5))
-                .cornerRadius(12)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule()
+                        .fill(.black.opacity(0.6))
+                        .background(
+                            Capsule()
+                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                        )
+                )
                 .padding(.bottom, 20)
             }
+            
+            // Audio level bars visualization
+            HStack(spacing: 3) {
+                ForEach(0..<7) { index in
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(audioLevel > Float(index) / 7 ? Color.green : Color.gray.opacity(0.3))
+                        .frame(width: 4, height: barHeight(for: index))
+                        .animation(.easeOut(duration: 0.05), value: audioLevel)
+                }
+            }
+            .offset(y: 45)
         }
         .frame(width: 200, height: 200)
         .onAppear {
-            pulseScale = 1.2
-            pulseOpacity = 0.0
+            // Start pulse animation
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                pulseScale = 1.25
+                pulseOpacity = 0.2
+            }
+        }
+    }
+    
+    private func audioLevelColor(for ringIndex: Int) -> Color {
+        if audioLevel < 0.3 {
+            return .green
+        } else if audioLevel < 0.6 {
+            return .yellow
+        } else {
+            return .red
         }
     }
     
     private func scaleForRing(_ index: Int) -> CGFloat {
-        let baseScale = 0.6 + (CGFloat(index) * 0.15)
-        let levelScale = CGFloat(audioLevel) * 0.3
+        let baseScale = 0.5 + (CGFloat(index) * 0.08)
+        let levelScale = CGFloat(audioLevel) * (0.15 + CGFloat(index) * 0.02)
         return baseScale + levelScale
+    }
+    
+    private func barHeight(for index: Int) -> CGFloat {
+        let heights: [CGFloat] = [8, 14, 20, 24, 20, 14, 8]
+        let baseHeight = heights[index]
+        let levelMultiplier = 0.5 + CGFloat(audioLevel) * 0.5
+        return baseHeight * levelMultiplier
     }
 }
 
@@ -167,6 +241,8 @@ struct VisualEffectView: NSViewRepresentable {
         view.material = material
         view.blendingMode = blendingMode
         view.state = .active
+        view.wantsLayer = true
+        view.layer?.cornerRadius = 100
         return view
     }
     
@@ -180,11 +256,22 @@ struct VisualEffectView: NSViewRepresentable {
 
 struct RecordingOverlayView_Previews: PreviewProvider {
     static var previews: some View {
-        RecordingOverlayView(
-            audioLevel: .constant(0.5),
-            isRecording: .constant(true)
-        )
-        .frame(width: 200, height: 200)
-        .background(Color.black)
+        Group {
+            RecordingOverlayView(
+                audioLevel: .constant(0.3),
+                isRecording: .constant(true)
+            )
+            .frame(width: 200, height: 200)
+            .background(Color.black)
+            .previewDisplayName("Low Level")
+            
+            RecordingOverlayView(
+                audioLevel: .constant(0.7),
+                isRecording: .constant(true)
+            )
+            .frame(width: 200, height: 200)
+            .background(Color.black)
+            .previewDisplayName("High Level")
+        }
     }
 }
