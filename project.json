@@ -1,0 +1,10 @@
+{
+  "identifier": "com.neonpoison.flowmac",
+  "name": "Flow Mac",
+  "team": "NeonPoison",
+  "linear_prefix": "FLOW",
+  "repo_path": "/root/.openclaw/workspace/projects/flow-mac",
+  "platform": "macOS",
+  "stack": ["Swift", "SwiftUI", "Objective-C", "Whisper"],
+  "status": "planning"
+}
