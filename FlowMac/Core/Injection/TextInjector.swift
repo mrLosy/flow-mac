@@ -64,9 +64,9 @@ class TextInjector: NSObject, ObservableObject, TextInjectionServiceProtocol {
         guard result == .success, let element = focusedElement else {
             return false
         }
-        
-        let axElement = element as! AXUIElement
-        
+
+        guard let axElement = element as? AXUIElement else { return false }
+
         // Try to get current value and append (for some text fields)
         var currentValue: AnyObject?
         let valueResult = AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &currentValue)
@@ -161,7 +161,7 @@ class TextInjector: NSObject, ObservableObject, TextInjectionServiceProtocol {
             return false
         }
 
-        let axElement = element as! AXUIElement
+        guard let axElement = element as? AXUIElement else { return false }
 
         // Проверяем роль элемента
         var roleValue: AnyObject?
