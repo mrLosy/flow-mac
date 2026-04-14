@@ -7,20 +7,27 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
     @Published var transcribedText = ""
     @Published var errorMessage: String?
     @Published var partialText = ""
+    @Published var transcriptionHistory: [TranscriptionEntry] = []
     
-    private var apiKey: String {
-        UserDefaults.standard.string(forKey: "whisperAPIKey") ?? ""
+    private var provider: TranscriptionProvider {
+        TranscriptionProvider.current
     }
-    
-    private let apiURL = "https://api.openai.com/v1/audio/transcriptions"
+
+    private var apiKey: String {
+        provider.apiKey
+    }
+
+    private var apiURL: String {
+        provider.apiURL
+    }
     private var urlSession: URLSession
     private var streamingTask: URLSessionDataTask?
     private var retryCount = 0
     private let maxRetries = 3
     private let retryDelay: TimeInterval = 2.0
-    
+
     weak var streamingDelegate: StreamingTranscriptionDelegate?
-    
+
     override init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
@@ -28,6 +35,8 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
         config.waitsForConnectivity = true
         self.urlSession = URLSession(configuration: config)
         super.init()
+
+        TranscriptionProvider.migrateIfNeeded()
     }
     
     /// Transcribe audio data using Whisper API with retry logic
@@ -71,9 +80,11 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
             return
         }
         
+        DebugLog.log("API: url=\(apiURL), key=\(String(apiKey.prefix(15)))..., provider=\(provider.rawValue)")
+
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(provider.authHeaderValue, forHTTPHeaderField: provider.authHeaderName)
         
         let boundary = "Boundary-\(UUID().uuidString)"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
@@ -117,6 +128,7 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
             // Handle HTTP errors
             if !(200...299).contains(httpResponse.statusCode) {
                 let errorMessage = self.parseErrorResponse(data: data) ?? "HTTP \(httpResponse.statusCode)"
+                DebugLog.log("API ERROR: HTTP \(httpResponse.statusCode) — \(errorMessage)")
                 DispatchQueue.main.async {
                     self.errorMessage = errorMessage
                 }
@@ -146,11 +158,15 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
                 DispatchQueue.main.async {
                     self.transcribedText = result.text
                     self.partialText = ""
+                    self.transcriptionHistory.insert(
+                        TranscriptionEntry(text: result.text, timestamp: Date()),
+                        at: 0
+                    )
                 }
                 completion(.success(result.text))
             } catch {
-                // Try to extract error message from OpenAI
-                if let errorResponse = try? JSONDecoder().decode(OpenAIError.self, from: data) {
+                // Try to extract error message (OpenAI-compatible format)
+                if let errorResponse = try? JSONDecoder().decode(APIErrorResponse.self, from: data) {
                     DispatchQueue.main.async {
                         self.errorMessage = errorResponse.error.message
                     }
@@ -211,7 +227,7 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
         // Add model parameter
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"model\"\r\n\r\n".data(using: .utf8)!)
-        body.append("whisper-1\r\n".data(using: .utf8)!)
+        body.append("\(provider.modelName)\r\n".data(using: .utf8)!)
         
         // Add language parameter
         let language = UserDefaults.standard.string(forKey: "recognitionLanguage") ?? "auto"
@@ -241,7 +257,7 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
     private func parseErrorResponse(data: Data?) -> String? {
         guard let data = data else { return nil }
         
-        if let errorResponse = try? JSONDecoder().decode(OpenAIError.self, from: data) {
+        if let errorResponse = try? JSONDecoder().decode(APIErrorResponse.self, from: data) {
             return errorResponse.error.message
         }
         
@@ -274,15 +290,26 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
     }
 }
 
+// MARK: - Transcription History
+
+struct TranscriptionEntry: Identifiable {
+    let id = UUID()
+    let text: String
+    let timestamp: Date
+}
+
 // MARK: - Models
 
 struct WhisperResponse: Codable {
     let text: String
 }
 
-struct OpenAIError: Codable {
+struct APIErrorResponse: Codable {
     let error: ErrorDetail
 }
+
+@available(*, deprecated, renamed: "APIErrorResponse")
+typealias OpenAIError = APIErrorResponse
 
 struct ErrorDetail: Codable {
     let message: String
@@ -306,7 +333,7 @@ enum RecognitionError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noAPIKey:
-            return "OpenAI API key not configured. Please add it in Settings."
+            return "API key not configured. Please add it in Settings."
         case .emptyAudio:
             return "No audio data to transcribe."
         case .noData:
