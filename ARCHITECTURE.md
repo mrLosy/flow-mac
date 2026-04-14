@@ -1,248 +1,92 @@
-# Flow Mac - Архитектура
+# Архитектура Flow Mac
 
 ## Обзор
 
-Flow Mac — menu bar приложение для macOS, которое захватывает аудио с микрофона, 
-отправляет его на OpenAI Whisper API для транскрипции и вставляет результат 
-в активное текстовое поле.
-
-**Статус**: ✅ Полностью реализовано
-
-## Структура проекта
-
-```
-FlowMac/
-├── App/                          # Точка входа
-│   ├── FlowMacApp.swift         # @main структура приложения
-│   └── AppDelegate.swift        # Делегат приложения
-│
-├── Core/                         # Основные сервисы
-│   ├── Audio/                   # Захват аудио
-│   │   ├── AudioCaptureServiceProtocol.swift
-│   │   └── AudioEngine.swift    # AVAudioEngine реализация
-│   │
-│   ├── Recognition/             # Распознавание речи
-│   │   ├── WhisperRecognitionServiceProtocol.swift
-│   │   └── RecognitionService.swift  # OpenAI API клиент
-│   │
-│   ├── Injection/               # Вставка текста
-│   │   ├── TextInjectionServiceProtocol.swift
-│   │   └── TextInjector.swift   # CGEvent + Accessibility
-│   │
-│   └── Hotkey/                  # Глобальные хоткеи
-│       ├── HotkeyManagerProtocol.swift
-│       └── HotkeyManager.swift  # Carbon EventTap
-│
-├── Features/                     # UI компоненты
-│   ├── Recording/               # Запись и индикаторы
-│   │   ├── StatusBarController.swift
-│   │   ├── StatusBarMenuView.swift
-│   │   └── RecordingOverlay.swift
-│   │
-│   └── Settings/                # Настройки
-│       ├── SettingsWindow.swift
-│       └── SettingsView.swift
-│
-├── Resources/                    # Ресурсы
-│   ├── Assets.xcassets/         # Иконки
-│   ├── FlowMac.entitlements     # Разрешения
-│   └── Info.plist              # Конфигурация
-│
-└── Tests/                        # Тесты
-    ├── Core/                    # Unit тесты сервисов
-    └── Integration/             # Интеграционные тесты
-```
+Menu bar приложение: хоткей → запись микрофона → Whisper API → вставка текста в активное поле.
 
 ## Поток данных
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│  Hotkey     │────▶│   Recording  │────▶│   Audio     │
-│  (Cmd+Shift+│     │   Started    │     │   Buffer    │
-│   Space)    │     └──────────────┘     └──────┬──────┘
-└─────────────┘                                 │
-                                                ▼
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│  Result     │◀────│  Text        │◀────│  Whisper    │
-│  Inserted   │     │  Injection   │     │  API        │
-└─────────────┘     └──────────────┘     └─────────────┘
+Hotkey (Cmd+Shift+Space)
+  → AudioEngine.startRecording()     # AVAudioEngine, 16kHz PCM mono
+  → AudioEngine.stopRecording()      # → WAV Data
+  → RecognitionService.transcribe()  # multipart POST → OpenAI/Groq
+  → TranscriptionCleaner.clean()     # нормализация текста
+  → TextInjector.insertText()        # Accessibility → CGEvent → Pasteboard
 ```
 
-## Ключевые компоненты
+## Компоненты
 
-### AudioEngine
+### App/
 
-**Файл**: `Core/Audio/AudioEngine.swift`
+**FlowMacApp.swift** — `@main` точка входа. Содержит `AppDelegate` как inner class с `@MainActor`. AppDelegate — DI-координатор: создаёт все сервисы и связывает их.
 
-**Возможности**:
-- Использует `AVAudioEngine` для захвата аудио
-- Конвертирует в PCM 16-bit 16kHz (оптимально для Whisper)
-- Реализует `AudioCaptureServiceProtocol`
-- Предоставляет уровень громкости для UI
-- Генерирует WAV файлы с правильными заголовками
+### Core/Audio/
 
-**API**:
-```swift
-func startRecording()                    // Начать запись
-func stopRecording() -> Data?           // Остановить и получить WAV
-func requestPermission(completion:)      // Запросить разрешение микрофона
-```
+- **AudioEngine** — AVAudioEngine, захват с inputNode, конвертация в 16kHz Int16 PCM mono, генерация WAV с RIFF-заголовками. Audio level delegate для UI.
+- **AudioValidator** — проверка микрофона и разрешений перед записью.
+- **MicVolumeManager** — управление системной громкостью микрофона.
 
-### RecognitionService
+### Core/Recognition/
 
-**Файл**: `Core/Recognition/RecognitionService.swift`
+- **RecognitionService** — HTTP клиент для Whisper API. Multipart/form-data, retry 3x с exponential backoff.
+- **TranscriptionProvider** — enum OpenAI/Groq с endpoint и model конфигурацией. Центральная точка добавления новых провайдеров.
+- **TranscriptionCleaner** — пост-обработка текста (пробелы, пунктуация).
+- **FileTranscriptionService** — транскрипция аудиофайлов.
 
-**Возможности**:
-- HTTP клиент для OpenAI Whisper API
-- Поддержка multipart/form-data запросов
-- Обработка ошибок и retry logic (3 попытки)
-- Поддержка выбора языка
-- API key из UserDefaults
+### Core/Injection/
 
-**API**:
-```swift
-func transcribe(audioData:completion:)   // Транскрибировать аудио
-func startStreamingTranscription(onResult:)  // Для будущего streaming
-func stopStreamingTranscription()
-```
+- **TextInjector** — вставка текста с fallback chain: Accessibility API → CGEvent Unicode → NSPasteboard (Cmd+V). Сохраняет/восстанавливает буфер обмена. Звуковая обратная связь.
 
-### TextInjector
+### Core/Hotkey/
 
-**Файл**: `Core/Injection/TextInjector.swift`
+- **HotkeyManager** — Carbon `RegisterEventHotKey` + CGEventTap fallback. Toggle recording, настраиваемые комбинации клавиш.
+- **HotkeyManager+EventHandling** — расширение с логикой обработки событий.
 
-**Возможности**:
-- Три метода вставки текста с fallback chain:
-  1. Accessibility API (самый надёжный для native apps)
-  2. CGEvent keystroke simulation с Unicode
-  3. Pasteboard fallback (Cmd+V)
-- Поддержка Unicode и эмодзи
-- Сохранение и восстановление буфера обмена
+### Core/ (вспомогательные сервисы)
 
-**API**:
-```swift
-func insertText(_ text: String)          // Вставить текст
-func checkAccessibilityPermissions() -> Bool
-func requestAccessibilityPermissions()
-```
+- **KeychainService** — безопасное хранение API ключей в macOS Keychain.
+- **NotificationService** — пользовательские уведомления об ошибках и статусе.
+- **TranscriptionHistoryService** — логирование транскрипций.
+- **UsageMetricsService** — статистика использования.
+- **SemanticCorrectionService** — контекстная коррекция текста.
+- **DebugLog** — логирование в Console.app через NSLog.
 
-### HotkeyManager
+### Features/Recording/
 
-**Файл**: `Core/Hotkey/HotkeyManager.swift`
+- **StatusBarController** — NSStatusBar, анимация иконки при записи, popover.
+- **StatusBarMenuView** — SwiftUI меню с информацией о провайдере и quick actions.
+- **RecordingOverlay** — borderless NSWindow с waveform-визуализацией.
 
-**Возможности**:
-- Carbon RegisterEventHotKey для глобальных событий
-- CGEventTap как fallback
-- Регистрация произвольных комбинаций
-- Callback в main thread
-- Toggle recording функционал
+### Features/Settings/
 
-**API**:
-```swift
-func startMonitoring()                   // Начать мониторинг
-func stopMonitoring()                    // Остановить мониторинг
-func updateHotkey(keyCode:modifiers:)    // Изменить хоткей
-func getCurrentHotkey() -> (keyCode: CGKeyCode, modifiers: CGEventFlags)
-func getHotkeyString() -> String         // Человекочитаемое представление
-```
+- **SettingsView** — TabView (General, Shortcuts, Audio, About).
+- **SettingsTabContent** — содержимое табов.
+- **ProviderSettingsView** — настройка провайдеров транскрипции.
+- **ShortcutRecorder** — визуальный recorder для назначения хоткея.
 
-### StatusBarController
+### Features/Metrics/
 
-**Файл**: `Features/Recording/StatusBarController.swift`
+- **UsageMetricsView** — отображение статистики транскрипций.
 
-**Возможности**:
-- NSStatusBar для menu bar
-- Анимация иконки при записи
-- Dropdown меню
-- Popover с информацией о статусе
+## Паттерны
 
-### RecordingOverlay
-
-**Файл**: `Features/Recording/RecordingOverlay.swift`
-
-**Возможности**:
-- Borderless NSWindow
-- Пульсирующий индикатор записи
-- Визуализация уровня звука
-- SwiftUI анимации
-
-### SettingsView
-
-**Файл**: `Features/Settings/SettingsView.swift`
-
-**Возможности**:
-- TabView с 4 табами: General, Shortcuts, Audio, About
-- Настройка API ключа
-- Выбор языка
-- Настройка хоткея с визуальным recorder
-- Список аудио устройств
-- Информация о разрешениях
-
-## Разрешения (Entitlements)
-
-```xml
-com.apple.security.app-sandbox           — App Sandbox
-com.apple.security.device.audio-input    — Микрофон
-com.apple.security.network.client        — Сеть (Whisper API)
-com.apple.security.automation.apple-events — Accessibility
-```
+- `@MainActor` на AppDelegate и UI-обновлениях
+- `@Published` + `ObservableObject` на сервисах для SwiftUI binding
+- `weak var delegate` для audio level callbacks
+- Completion handlers (не async/await)
+- Protocol + конкретный класс для каждого сервиса
 
 ## Зависимости
 
-- **Внешние**: Нет (только системные фреймворки)
-- **Встроенные**:
-  - AVFoundation (аудио)
-  - Carbon (хоткеи)
-  - CoreGraphics (CGEvent)
-  - SwiftUI (UI)
-  - UserNotifications (уведомления)
+Только системные фреймворки: AVFoundation, Carbon, CoreGraphics, SwiftUI, UserNotifications.
 
-## Минимальная версия
+## Разрешения (Entitlements)
 
-- macOS 13.0+
-- Xcode 15.0+
-- Swift 5.9+
+```
+com.apple.security.device.audio-input
+com.apple.security.network.client
+com.apple.security.automation.apple-events
+```
 
-## Тестирование
-
-### Unit Tests
-- `AudioEngineTests` - Тесты аудио захвата
-- `RecognitionServiceTests` - Тесты API клиента
-- `TextInjectorTests` - Тесты вставки текста
-- `HotkeyManagerTests` - Тесты хоткеев
-
-### Integration Tests
-- `FlowMacIntegrationTests` - Полный workflow:
-  - Запись аудио
-  - Генерация WAV
-  - Формат данных
-  - Интеграция сервисов
-
-## Производительность
-
-- Аудио буфер: 4096 семплов (~256ms при 16kHz)
-- Конвертация формата: realtime через AVAudioConverter
-- Отправка на API: async с retry
-- Вставка текста: < 100ms
-
-## Безопасность
-
-- API key хранится в UserDefaults (в будущем Keychain)
-- Аудио не сохраняется локально
-- HTTPS для всех API запросов
-- Sandboxing включён
-
-## Известные ограничения
-
-1. Требуется интернет для работы Whisper API
-2. Нет офлайн режима (требуется локальная модель)
-3. Первый запуск требует множества разрешений
-4. API key хранится в UserDefaults (не Keychain)
-
-## Roadmap
-
-- [ ] Streaming transcription для real-time результата
-- [ ] Локальная Whisper модель для офлайн режима
-- [ ] Keychain для хранения API key
-- [ ] История транскрипций
-- [ ] Голосовые команды (пунктуация)
-- [ ] Поддержка других провайдеров (Google, Azure)
+Для App Store: Hardened Runtime + App Sandbox (ограничивает CGEventTap).

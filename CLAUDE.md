@@ -24,19 +24,26 @@ xcodebuild -project FlowMac.xcodeproj -scheme FlowMac -configuration Release bui
 
 ## Архитектура
 
-AppDelegate — DI-координатор: создаёт все сервисы и передаёт их зависимости вручную.
+AppDelegate (inner class в FlowMacApp.swift) — DI-координатор: создаёт все сервисы и передаёт зависимости вручную.
 
 ```
 FlowMac/
-├── App/            # FlowMacApp.swift (@main), AppDelegate (coordinator)
+├── App/              # FlowMacApp.swift (@main + AppDelegate inner class)
 ├── Core/
-│   ├── Audio/      # AudioEngine: AVAudioEngine → 16kHz PCM mono WAV
-│   ├── Recognition/# RecognitionService: multipart POST → Whisper API, retry 3x
-│   ├── Injection/  # TextInjector: Accessibility → CGEvent → NSPasteboard fallback
-│   └── Hotkey/     # HotkeyManager: Carbon RegisterEventHotKey + CGEventTap fallback
+│   ├── Audio/        # AudioEngine, AudioValidator, MicVolumeManager
+│   ├── Recognition/  # RecognitionService, TranscriptionProvider, TranscriptionCleaner
+│   ├── Injection/    # TextInjector: Accessibility → CGEvent → Pasteboard
+│   ├── Hotkey/       # HotkeyManager + EventHandling extension
+│   ├── Security/     # KeychainService
+│   ├── Notifications/# NotificationService
+│   ├── History/      # TranscriptionHistoryService
+│   ├── Metrics/      # UsageMetricsService
+│   ├── PostProcessing/# SemanticCorrectionService
+│   └── DebugLog.swift
 └── Features/
-    ├── Recording/  # StatusBarController, RecordingOverlay
-    └── Settings/   # SettingsView (TabView: General, Shortcuts, Audio, About)
+    ├── Recording/    # StatusBarController, StatusBarMenuView, RecordingOverlay
+    ├── Settings/     # SettingsView, SettingsTabContent, ProviderSettingsView, ShortcutRecorder
+    └── Metrics/      # UsageMetricsView
 ```
 
 Каждый сервис: Protocol + конкретный класс. Мокай через Protocol в тестах.
@@ -67,13 +74,13 @@ FlowMac/
 - Никогда не хардкодь API ключи — только `UserDefaults` через `TranscriptionProvider`
 - `guard let` вместо `if let` для ранних возвратов
 - Избегай `!` force unwrap — только там где сбой невозможен по контракту
-- Логирование: `NSLog("[FlowMac] ...")` — не `print()` (NSLog попадает в Console.app)
+- Логирование: `DebugLog.log(...)` — обёртка над NSLog, не `print()`
 - После изменений в entitlements или Info.plist — пересобирай clean build
 - Не трогай `AudioEngine` формат: 16kHz, mono, Int16 — Whisper требует именно это
 
 ## Текущий статус MVP
 
-Что работает: UI, настройки, hotkey registration.
-Что не протестировано: реальная запись → транскрипция → вставка текста (core workflow).
+Реализовано: UI, настройки, hotkey, аудио, транскрипция (OpenAI/Groq), вставка текста, история, метрики, keychain.
+Core workflow собран: `HotkeyManager → AudioEngine → RecognitionService → TextInjector`.
 
-Приоритет: довести до рабочего состояния `HotkeyManager → AudioEngine → RecognitionService → TextInjector`.
+Приоритет: тестирование полного пайплайна на реальном использовании, подготовка к App Store.

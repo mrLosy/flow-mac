@@ -20,7 +20,12 @@
       "Read(//Users/stashkevich/Library/Containers/com.flowmac.app/Data/Library/Preferences/**)",
       "Bash(defaults write:*)",
       "Bash(rm -f /Users/stashkevich/Library/Containers/com.flowmac.app/Data/Library/Caches/flowmac_debug.log)",
-      "Bash(security delete-generic-password:*)"
+      "Bash(security delete-generic-password:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(xargs ls:*)",
+      "Bash(wc -l /Users/stashkevich/Desktop/personal/flow-mac/FlowMac/Core/**/*.swift)",
+      "Bash(git stash:*)"
     ],
     "additionalDirectories": [
       "/Users/stashkevich/Desktop"
