@@ -224,10 +224,12 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
         guard let channelData = buffer.floatChannelData?[0] else { return }
 
         let frameLength = Int(buffer.frameLength)
-        let samples = Array(UnsafeBufferPointer(start: channelData, count: frameLength))
 
-        // Calculate RMS
-        let sum = samples.map { $0 * $0 }.reduce(0, +)
+        var sum: Float = 0
+        for i in 0..<frameLength {
+            let sample = channelData[i]
+            sum += sample * sample
+        }
         let rms = sqrt(sum / Float(frameLength))
 
         // Normalize with logarithmic scaling for better visualization
