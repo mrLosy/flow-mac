@@ -1,25 +1,34 @@
 import Foundation
 import CoreGraphics
 
+/// Recording mode for global hotkeys
+enum RecordingMode: String, CaseIterable {
+    case toggle
+    case pushToTalk
+    case express
+}
+
+/// Hotkey key code + modifier pair
+struct HotkeyConfig {
+    var keyCode: UInt32
+    var modifiers: UInt32 // Carbon modifier format
+}
+
 /// Protocol defining hotkey manager interface
 protocol HotkeyManagerProtocol: AnyObject, ObservableObject {
     var isRecording: Bool { get }
-    
+
     /// Start monitoring for global hotkey events
     func startMonitoring()
-    
+
     /// Stop monitoring hotkey events
     func stopMonitoring()
-    
-    /// Update hotkey configuration
-    /// - Parameters:
-    ///   - keyCode: Virtual key code
-    ///   - modifiers: Modifier flags (Command, Option, Control, Shift)
-    func updateHotkey(keyCode: CGKeyCode, modifiers: CGEventFlags)
-    
-    /// Get current hotkey configuration
-    /// - Returns: Tuple of key code and modifiers
-    func getCurrentHotkey() -> (keyCode: CGKeyCode, modifiers: CGEventFlags)
+
+    /// Update hotkey configuration for a specific mode
+    func updateHotkey(mode: RecordingMode, keyCode: CGKeyCode, modifiers: CGEventFlags)
+
+    /// Get current hotkey configuration for a specific mode
+    func getCurrentHotkey(for mode: RecordingMode) -> (keyCode: CGKeyCode, modifiers: CGEventFlags)
 }
 
 /// Protocol for hotkey event delegates

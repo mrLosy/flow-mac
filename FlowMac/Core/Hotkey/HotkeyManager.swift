@@ -2,33 +2,60 @@ import Foundation
 import Carbon
 import CoreGraphics
 import Combine
+import AppKit
 
-/// Manages global hotkeys using Carbon RegisterEventHotKey and CGEventTap
+/// Manages two global hotkeys via CGEventTap:
+/// - Toggle: press to start, press again to stop
+/// - Push-to-Talk: hold to record, release to stop
 class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
     @Published var isRecording = false
-    
-    private var audioEngine: AudioEngine
-    private var recognitionService: RecognitionService
-    private var textInjector: TextInjector
-    private var recordingOverlay: RecordingOverlayWindow
-    
-    // Carbon hotkey references
-    private var hotKeyRef: EventHotKeyRef?
-    private var eventHandlerRef: EventHandlerRef?
-    
-    // CGEventTap as fallback
-    private var eventTap: CFMachPort?
+
+    private(set) var audioEngine: AudioEngine
+    private(set) var recognitionService: RecognitionService
+    private(set) var textInjector: TextInjector
+    private(set) var recordingOverlay: RecordingOverlayWindow
+
+    // CGEventTap
+    var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    
-    // Default hotkey: Cmd + Shift + Space
-    private var hotkeyKeyCode: UInt32 = 49  // Space key
-    private var hotkeyModifiers: UInt32 = cmdKey | shiftKey // Cmd + Shift
-    
+
+    // Accessibility permission re-check timer
+    private var accessibilityCheckTimer: Timer?
+
+    // Three hotkey configs
+    var toggleHotkey = HotkeyConfig(keyCode: 49, modifiers: UInt32(cmdKey | shiftKey))
+    var pttHotkey = HotkeyConfig(keyCode: 2, modifiers: UInt32(cmdKey | shiftKey))
+    var expressHotkey = HotkeyConfig(keyCode: 0, modifiers: 0) // Disabled by default
+
+    // PTT state
+    var pttActive = false
+
+    // Express mode state
+    private var expressActive = false
+    private var expressTimer: Timer?
+    private let expressMaxDuration: TimeInterval = 300 // 5 min safety limit
+
+    // Modifier-only detection state
+    var toggleModOnlyPending = false
+    var toggleModOnlyKeyWasPressed = false
+    var pttModOnlyPending = false
+    var pttModOnlyKeyWasPressed = false
+
+    // NSEvent fallback monitors (used when CGEventTap unavailable)
+    private var globalKeyDownMonitor: Any?
+    private var globalKeyUpMonitor: Any?
+    private var globalFlagsMonitor: Any?
+    private var hasPromptedAccessibility = false
+
+    // Focus restoration
+    private var previousApp: NSRunningApplication?
+
+    // Metrics tracking
+    private var recordingStartTime: Date?
+
     weak var hotkeyDelegate: HotkeyDelegate?
-    
-    // Callback reference for Carbon event handler
-    private static var sharedManager: HotkeyManager?
-    
+    static var sharedManager: HotkeyManager?
+
     init(
         audioEngine: AudioEngine,
         recognitionService: RecognitionService,
@@ -40,381 +67,421 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
         self.textInjector = textInjector
         self.recordingOverlay = recordingOverlay
         super.init()
-        
+
         HotkeyManager.sharedManager = self
-        
         loadSettings()
         setupHotkey()
         setupNotificationObserver()
     }
-    
+
+    // MARK: - Notification Observers
+
     private func setupNotificationObserver() {
         NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleToggleNotification),
-            name: .toggleRecording,
-            object: nil
+            self, selector: #selector(handleToggleNotification),
+            name: .toggleRecording, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleHotkeyChangeNotification(_:)),
+            name: .hotkeyDidChange, object: nil
         )
     }
-    
-    @objc private func handleToggleNotification() {
-        toggleRecording()
+
+    @objc private func handleToggleNotification() { toggleRecording() }
+
+    @objc private func handleHotkeyChangeNotification(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let keyCode = userInfo["keyCode"] as? UInt16,
+              let modifiersRaw = userInfo["modifiers"] as? UInt else { return }
+
+        let modeRaw = userInfo["mode"] as? String ?? RecordingMode.toggle.rawValue
+        let mode = RecordingMode(rawValue: modeRaw) ?? .toggle
+        let modifiers = NSEvent.ModifierFlags(rawValue: modifiersRaw)
+        updateHotkey(mode: mode, keyCode: keyCode, modifiers: modifiers)
     }
-    
+
+    // MARK: - Settings Persistence
+
     private func loadSettings() {
-        // Load saved hotkey settings from UserDefaults
-        if let savedKeyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? UInt32 {
-            hotkeyKeyCode = savedKeyCode
+        // Migration from old single-hotkey keys
+        if UserDefaults.standard.object(forKey: "toggleHotkeyKeyCode") == nil,
+           let oldKeyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? UInt32 {
+            let oldMods = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt32 ?? UInt32(cmdKey | shiftKey)
+            UserDefaults.standard.set(oldKeyCode, forKey: "toggleHotkeyKeyCode")
+            UserDefaults.standard.set(oldMods, forKey: "toggleHotkeyModifiers")
+            UserDefaults.standard.removeObject(forKey: "hotkeyKeyCode")
+            UserDefaults.standard.removeObject(forKey: "hotkeyModifiers")
         }
-        
-        if let savedModifiers = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt32 {
-            hotkeyModifiers = savedModifiers
-        } else {
-            // Default: Cmd + Shift + Space
-            hotkeyModifiers = cmdKey | shiftKey
-            UserDefaults.standard.set(hotkeyModifiers, forKey: "hotkeyModifiers")
-            UserDefaults.standard.set(hotkeyKeyCode, forKey: "hotkeyKeyCode")
-        }
+
+        if let kc = UserDefaults.standard.object(forKey: "toggleHotkeyKeyCode") as? UInt32 { toggleHotkey.keyCode = kc }
+        if let m = UserDefaults.standard.object(forKey: "toggleHotkeyModifiers") as? UInt32 { toggleHotkey.modifiers = m }
+        if let kc = UserDefaults.standard.object(forKey: "pttHotkeyKeyCode") as? UInt32 { pttHotkey.keyCode = kc }
+        if let m = UserDefaults.standard.object(forKey: "pttHotkeyModifiers") as? UInt32 { pttHotkey.modifiers = m }
+        if let kc = UserDefaults.standard.object(forKey: "expressHotkeyKeyCode") as? UInt32 { expressHotkey.keyCode = kc }
+        if let m = UserDefaults.standard.object(forKey: "expressHotkeyModifiers") as? UInt32 { expressHotkey.modifiers = m }
     }
-    
-    /// Set up global hotkey monitoring using Carbon
+
+    private func saveHotkey(_ config: HotkeyConfig, mode: RecordingMode) {
+        let prefix: String
+        switch mode {
+        case .toggle: prefix = "toggleHotkey"
+        case .pushToTalk: prefix = "pttHotkey"
+        case .express: prefix = "expressHotkey"
+        }
+        UserDefaults.standard.set(config.keyCode, forKey: "\(prefix)KeyCode")
+        UserDefaults.standard.set(config.modifiers, forKey: "\(prefix)Modifiers")
+    }
+
+    // MARK: - Hotkey Setup
+
     private func setupHotkey() {
-        // Check for accessibility permission
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-        guard AXIsProcessTrustedWithOptions(options as CFDictionary) else {
-            print("Accessibility permission required for global hotkeys")
-            // Fall back to CGEventTap which also requires accessibility
+        let shouldPrompt = !hasPromptedAccessibility
+        hasPromptedAccessibility = true
+
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: shouldPrompt]
+        let trusted = AXIsProcessTrustedWithOptions(options as CFDictionary)
+        DebugLog.log("HK1. setupHotkey: trusted=\(trusted), prompted=\(shouldPrompt)")
+
+        if trusted {
+            accessibilityCheckTimer?.invalidate()
+            accessibilityCheckTimer = nil
+            removeNSEventFallback()
             setupCGEventTap()
-            return
+        } else {
+            NSLog("[FlowMac] Accessibility not granted — installing NSEvent fallback monitors")
+            setupNSEventFallback()
+            startAccessibilityCheckTimer()
         }
-        
-        registerCarbonHotkey()
     }
-    
-    /// Register hotkey using Carbon Event Manager
-    private func registerCarbonHotkey() {
-        // Create event type spec for hotkey events
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: OSType(kEventHotKeyPressed)
-        )
-        
-        // Install event handler
-        let handlerUPP = NewEventHandlerUPP { _, eventRef, _ -> OSStatus in
-            guard HotkeyManager.sharedManager != nil else { return noErr }
-            
-            var hotKeyID = EventHotKeyID()
-            GetEventParameter(
-                eventRef,
-                EventParamName(kEventParamDirectObject),
-                EventParamType(typeEventHotKeyID),
-                nil,
-                MemoryLayout<EventHotKeyID>.size,
-                nil,
-                &hotKeyID
-            )
-            
-            if hotKeyID.id == 1 {
+
+    private func startAccessibilityCheckTimer() {
+        guard accessibilityCheckTimer == nil else { return }
+        accessibilityCheckTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
+            if AXIsProcessTrustedWithOptions(opts) {
                 DispatchQueue.main.async {
-                    HotkeyManager.sharedManager?.toggleRecording()
+                    self?.accessibilityCheckTimer?.invalidate()
+                    self?.accessibilityCheckTimer = nil
+                    self?.setupHotkey()
                 }
             }
-            
-            return noErr
-        }
-        
-        let status = InstallEventHandler(
-            GetApplicationEventTarget(),
-            handlerUPP,
-            1,
-            &eventType,
-            nil,
-            &eventHandlerRef
-        )
-        
-        guard status == noErr else {
-            print("Failed to install event handler: \(status)")
-            setupCGEventTap()
-            return
-        }
-        
-        // Register the hotkey
-        let hotKeyID = EventHotKeyID(signature: OSType(fourCharCode("FLMC")), id: 1)
-        
-        let regStatus = RegisterEventHotKey(
-            hotkeyKeyCode,
-            hotkeyModifiers,
-            hotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &hotKeyRef
-        )
-        
-        if regStatus == noErr {
-            print("Registered hotkey: Cmd+Shift+Space (keyCode: \(hotkeyKeyCode), modifiers: \(hotkeyModifiers))")
-        } else {
-            print("Failed to register hotkey: \(regStatus)")
-            setupCGEventTap()
         }
     }
-    
-    /// Fall back to CGEventTap for hotkey monitoring
+
     private func setupCGEventTap() {
-        let eventMask = (1 << CGEventType.keyDown.rawValue)
-        
+        // Clean up any existing tap first
+        if let oldTap = eventTap {
+            CGEvent.tapEnable(tap: oldTap, enable: false)
+        }
+        if let oldSource = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), oldSource, .commonModes)
+        }
+        eventTap = nil
+        runLoopSource = nil
+
+        let eventMask: CGEventMask =
+            (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.keyUp.rawValue) |
+            (1 << CGEventType.flagsChanged.rawValue)
+
         guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: CGEventMask(eventMask),
+            tap: .cgSessionEventTap, place: .headInsertEventTap,
+            options: .defaultTap, eventsOfInterest: eventMask,
             callback: cgEventCallback,
             userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         ) else {
-            print("Failed to create event tap")
+            DebugLog.log("HK2. FAILED to create CGEventTap — fallback to NSEvent")
+            setupNSEventFallback()
             return
         }
-        
+
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        
+
         if let source = runLoopSource {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
             CGEvent.tapEnable(tap: tap, enable: true)
         }
-        
-        // Start monitoring in background thread
-        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            CFRunLoopRun()
+
+        DebugLog.log("HK3. CGEventTap OK — toggle=\(HotkeyManager.hotkeyDisplayString(toggleHotkey)), PTT=\(HotkeyManager.hotkeyDisplayString(pttHotkey))")
+    }
+
+    // MARK: - NSEvent Fallback
+
+    private func setupNSEventFallback() {
+        guard globalKeyDownMonitor == nil else { return }
+
+        globalKeyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleNSKeyEvent(event, isDown: true)
         }
-        
-        print("CGEventTap hotkey monitoring started")
+        globalKeyUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyUp) { [weak self] event in
+            self?.handleNSKeyEvent(event, isDown: false)
+        }
+        globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.handleNSFlagsEvent(event)
+        }
+        NSLog("[FlowMac] NSEvent global monitors installed as fallback")
     }
-    
-    /// Start monitoring for global hotkey events
-    func startMonitoring() {
-        // Already started in setup
+
+    private func removeNSEventFallback() {
+        for monitor in [globalKeyDownMonitor, globalKeyUpMonitor, globalFlagsMonitor].compactMap({ $0 }) {
+            NSEvent.removeMonitor(monitor)
+        }
+        globalKeyDownMonitor = nil
+        globalKeyUpMonitor = nil
+        globalFlagsMonitor = nil
     }
-    
-    /// Stop monitoring hotkey events
+
+    func startMonitoring() {}
+
     func stopMonitoring() {
-        // Unregister Carbon hotkey
-        if let hotKeyRef = hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
-        }
-        
-        // Remove event handler
-        if let eventHandlerRef = eventHandlerRef {
-            RemoveEventHandler(eventHandlerRef)
-            self.eventHandlerRef = nil
-        }
-        
-        // Stop CGEventTap
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-        }
+        accessibilityCheckTimer?.invalidate()
+        accessibilityCheckTimer = nil
+        removeNSEventFallback()
+        if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
         if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
         }
         eventTap = nil
         runLoopSource = nil
     }
-    
-    /// Check if hotkey is pressed
-    func isHotkeyPressed(event: CGEvent) -> Bool {
-        let keyCode = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
-        let flags = event.flags
-        
-        // Convert CGEventFlags to Carbon modifiers
-        var carbonModifiers: UInt32 = 0
-        if flags.contains(.maskCommand) { carbonModifiers |= cmdKey }
-        if flags.contains(.maskShift) { carbonModifiers |= shiftKey }
-        if flags.contains(.maskAlternate) { carbonModifiers |= optionKey }
-        if flags.contains(.maskControl) { carbonModifiers |= controlKey }
-        
-        return keyCode == hotkeyKeyCode && carbonModifiers == hotkeyModifiers
-    }
-    
-    /// Handle hotkey event from CGEventTap
-    func handleCGEvent(_ event: CGEvent) -> Bool {
-        guard isHotkeyPressed(event: event) else {
-            return false // Event not handled
-        }
-        
-        DispatchQueue.main.async { [weak self] in
-            self?.toggleRecording()
-        }
-        hotkeyDelegate?.hotkeyDidTrigger()
-        
-        return true // Event handled
-    }
-    
-    /// Toggle recording state
+
+    // MARK: - Recording Control
+
     @objc func toggleRecording() {
-        if isRecording {
-            stopRecording()
-        } else {
-            startRecording()
-        }
+        if isRecording { stopRecording() } else { startRecording() }
     }
-    
-    /// Start recording and transcription
-    private func startRecording() {
-        // Request microphone permission first
+
+    func startRecording(showOverlay: Bool = true) {
+        DebugLog.log("REC1. startRecording called, isRecording=\(isRecording)")
+        guard !isRecording else { return }
+
+        // Pre-flight: проверяем всё до начала записи
+        if let error = NotificationService.shared.preflightCheck() {
+            DebugLog.log("REC2. PREFLIGHT FAILED: \(error)")
+            NotificationService.shared.notifyError(error)
+            return
+        }
+        DebugLog.log("REC3. preflight OK")
+
+        // Save the frontmost app for focus restoration after injection
+        previousApp = NSWorkspace.shared.frontmostApplication
+        NSLog("[FlowMac] Saved previous app: \(previousApp?.localizedName ?? "none")")
         audioEngine.requestPermission { [weak self] granted in
-            guard let self = self else { return }
-            
+            guard let self else { return }
+            NSLog("[FlowMac] Mic permission callback: granted=\(granted)")
             guard granted else {
-                self.showErrorNotification(message: "Microphone permission required")
+                NotificationService.shared.notifyError(.microphoneDenied)
                 return
             }
-            
-            DispatchQueue.main.async {
+            Task { @MainActor in
                 self.isRecording = true
-                self.recordingOverlay.show()
-                self.audioEngine.startRecording()
+                if showOverlay { self.recordingOverlay.show() }
+                self.recordingStartTime = Date()
+                MicVolumeManager.shared.boostIfEnabled()
+
+                if let startError = self.audioEngine.startRecordingSafe() {
+                    NSLog("[FlowMac] AudioEngine start failed: \(startError)")
+                    NotificationService.shared.notifyRecordingError(startError)
+                    self.isRecording = false
+                    if showOverlay { self.recordingOverlay.hide() }
+                    MicVolumeManager.shared.restoreIfNeeded()
+                    return
+                }
+
                 self.hotkeyDelegate?.hotkeyDidTrigger()
-                
-                // Play start sound
                 self.playStartSound()
+                NSLog("[FlowMac] Recording started, overlay=\(showOverlay)")
             }
         }
     }
-    
-    /// Stop recording and process transcription
-    private func stopRecording() {
+
+    func stopRecording() {
+        NSLog("[FlowMac] stopRecording called, isRecording=\(isRecording)")
+        guard isRecording else { return }
         isRecording = false
-        recordingOverlay.hide()
+        expressTimer?.invalidate()
+        expressTimer = nil
+        Task { @MainActor in recordingOverlay.hide() }
         hotkeyDelegate?.hotkeyDidRelease()
-        
+
         guard let audioData = audioEngine.stopRecording() else {
-            print("No audio data captured")
+            NSLog("[FlowMac] No audio data captured")
+            NotificationService.shared.notifyRecordingError("Не удалось записать аудио — данные пусты")
+            MicVolumeManager.shared.restoreIfNeeded()
             return
         }
-        
-        // Play stop sound
+        MicVolumeManager.shared.restoreIfNeeded()
         playStopSound()
-        
-        // Validate audio data size
-        guard audioData.count > 100 else {
-            showErrorNotification(message: "Audio too short, please try again")
+
+        // Validate audio before sending to API
+        if case .failure(let error) = AudioValidator.validate(audioData) {
+            switch error {
+            case .silentRecording:
+                NotificationService.shared.notifyNoSpeech()
+            default:
+                NotificationService.shared.notifyRecordingError(error.localizedDescription)
+            }
             return
         }
-        
-        // Send to recognition service
+
         recognitionService.transcribe(audioData: audioData) { [weak self] result in
             DispatchQueue.main.async {
                 switch result {
                 case .success(let text):
-                    guard !text.isEmpty else {
-                        self?.showErrorNotification(message: "No speech detected")
+                    let cleanedText = TranscriptionCleaner.clean(text)
+                    guard !cleanedText.isEmpty else {
+                        NotificationService.shared.notifyNoSpeech()
                         return
                     }
-                    self?.textInjector.insertText(text)
+                    // Semantic correction (optional LLM post-processing)
+                    let category = AppCategory.detect(bundleIdentifier: self?.previousApp?.bundleIdentifier)
+                    SemanticCorrectionService.shared.correct(text: cleanedText, category: category) { finalText in
+                        // Restore focus to the original app before injecting text
+                        self?.restoreFocus {
+                            let result = self?.textInjector.insertText(finalText) ?? .failed(.insertionFailed)
+                            switch result {
+                            case .injected:
+                                NSLog("[FlowMac] Text injected into focused field")
+                                self?.recordSuccessMetrics(text: finalText)
+                            case .copiedToClipboard:
+                                NSLog("[FlowMac] No text field focused — copied to clipboard")
+                                NotificationService.shared.notifyClipboard()
+                                self?.recordSuccessMetrics(text: finalText)
+                            case .failed(let error):
+                                NSLog("[FlowMac] Text injection failed: \(error.localizedDescription)")
+                                NotificationService.shared.notifyInjectionError(error.localizedDescription)
+                            }
+                        }
+                    }
                 case .failure(let error):
-                    print("Transcription error: \(error)")
-                    self?.showErrorNotification(error: error)
+                    NSLog("[FlowMac] Transcription error: \(error)")
+                    NotificationService.shared.notifyTranscriptionError(error.localizedDescription)
                 }
             }
         }
     }
-    
-    /// Update hotkey configuration
-    func updateHotkey(keyCode: CGKeyCode, modifiers: CGEventFlags) {
-        // Convert CGKeyCode to Carbon key code
-        hotkeyKeyCode = UInt32(keyCode)
-        
-        // Convert CGEventFlags to Carbon modifiers
-        hotkeyModifiers = 0
-        if modifiers.contains(.maskCommand) { hotkeyModifiers |= cmdKey }
-        if modifiers.contains(.maskShift) { hotkeyModifiers |= shiftKey }
-        if modifiers.contains(.maskAlternate) { hotkeyModifiers |= optionKey }
-        if modifiers.contains(.maskControl) { hotkeyModifiers |= controlKey }
-        
-        // Save to UserDefaults
-        UserDefaults.standard.set(hotkeyKeyCode, forKey: "hotkeyKeyCode")
-        UserDefaults.standard.set(hotkeyModifiers, forKey: "hotkeyModifiers")
-        
-        // Re-register hotkey
+
+    // MARK: - Update Hotkey
+
+    func updateHotkey(mode: RecordingMode, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
+        var cgFlags: CGEventFlags = []
+        if modifiers.contains(.command) { cgFlags.insert(.maskCommand) }
+        if modifiers.contains(.shift) { cgFlags.insert(.maskShift) }
+        if modifiers.contains(.option) { cgFlags.insert(.maskAlternate) }
+        if modifiers.contains(.control) { cgFlags.insert(.maskControl) }
+        updateHotkey(mode: mode, keyCode: CGKeyCode(keyCode), modifiers: cgFlags)
+    }
+
+    func updateHotkey(mode: RecordingMode, keyCode: CGKeyCode, modifiers: CGEventFlags) {
+        var carbonMods: UInt32 = 0
+        if modifiers.contains(.maskCommand) { carbonMods |= UInt32(cmdKey) }
+        if modifiers.contains(.maskShift) { carbonMods |= UInt32(shiftKey) }
+        if modifiers.contains(.maskAlternate) { carbonMods |= UInt32(optionKey) }
+        if modifiers.contains(.maskControl) { carbonMods |= UInt32(controlKey) }
+
+        let config = HotkeyConfig(keyCode: UInt32(keyCode), modifiers: carbonMods)
+        switch mode {
+        case .toggle: toggleHotkey = config
+        case .pushToTalk: pttHotkey = config
+        case .express: expressHotkey = config
+        }
+        saveHotkey(config, mode: mode)
         stopMonitoring()
         setupHotkey()
     }
-    
-    /// Get current hotkey configuration
-    func getCurrentHotkey() -> (keyCode: CGKeyCode, modifiers: CGEventFlags) {
-        var cgModifiers: CGEventFlags = []
-        if (hotkeyModifiers & cmdKey) != 0 { cgModifiers.insert(.maskCommand) }
-        if (hotkeyModifiers & shiftKey) != 0 { cgModifiers.insert(.maskShift) }
-        if (hotkeyModifiers & optionKey) != 0 { cgModifiers.insert(.maskAlternate) }
-        if (hotkeyModifiers & controlKey) != 0 { cgModifiers.insert(.maskControl) }
-        
-        return (CGKeyCode(hotkeyKeyCode), cgModifiers)
-    }
-    
-    /// Get current hotkey as readable string
-    func getHotkeyString() -> String {
-        var parts: [String] = []
-        
-        if (hotkeyModifiers & cmdKey) != 0 { parts.append("⌘") }
-        if (hotkeyModifiers & shiftKey) != 0 { parts.append("⇧") }
-        if (hotkeyModifiers & optionKey) != 0 { parts.append("⌥") }
-        if (hotkeyModifiers & controlKey) != 0 { parts.append("⌃") }
-        
-        let keyNames: [UInt32: String] = [
-            49: "Space",
-            36: "↵",
-            51: "⌫",
-            53: "Esc",
-            48: "⇥",
-            123: "←",
-            124: "→",
-            125: "↓",
-            126: "↑",
-        ]
-        
-        if let keyName = keyNames[hotkeyKeyCode] {
-            parts.append(keyName)
-        } else if hotkeyKeyCode >= 0 && hotkeyKeyCode <= 25 {
-            let letter = Character(UnicodeScalar(hotkeyKeyCode + 65)!)
-            parts.append(String(letter))
+
+    func getCurrentHotkey(for mode: RecordingMode) -> (keyCode: CGKeyCode, modifiers: CGEventFlags) {
+        let config: HotkeyConfig
+        switch mode {
+        case .toggle: config = toggleHotkey
+        case .pushToTalk: config = pttHotkey
+        case .express: config = expressHotkey
         }
-        
+        var cgMods: CGEventFlags = []
+        if (config.modifiers & UInt32(cmdKey)) != 0 { cgMods.insert(.maskCommand) }
+        if (config.modifiers & UInt32(shiftKey)) != 0 { cgMods.insert(.maskShift) }
+        if (config.modifiers & UInt32(optionKey)) != 0 { cgMods.insert(.maskAlternate) }
+        if (config.modifiers & UInt32(controlKey)) != 0 { cgMods.insert(.maskControl) }
+        return (CGKeyCode(config.keyCode), cgMods)
+    }
+
+    static func hotkeyDisplayString(_ config: HotkeyConfig) -> String {
+        var parts: [String] = []
+        if (config.modifiers & UInt32(cmdKey)) != 0 { parts.append("⌘") }
+        if (config.modifiers & UInt32(shiftKey)) != 0 { parts.append("⇧") }
+        if (config.modifiers & UInt32(optionKey)) != 0 { parts.append("⌥") }
+        if (config.modifiers & UInt32(controlKey)) != 0 { parts.append("⌃") }
+
+        let keyNames: [UInt32: String] = [
+            49: "Space", 36: "↵", 51: "⌫", 53: "Esc",
+            48: "⇥", 123: "←", 124: "→", 125: "↓", 126: "↑",
+        ]
+        if let name = keyNames[config.keyCode] { parts.append(name) }
+        else if config.keyCode > 0 && config.keyCode <= 25 {
+            parts.append(String(Character(UnicodeScalar(config.keyCode + 65)!)))
+        } else if config.keyCode > 25 { parts.append("Key\(config.keyCode)") }
+
         return parts.joined(separator: "+")
     }
-    
-    // MARK: - Sound Feedback
-    
+
+    // MARK: - Metrics
+
+    private func recordSuccessMetrics(text: String) {
+        let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+        TranscriptionHistoryService.shared.add(text: text, provider: TranscriptionProvider.current.displayName)
+        UsageMetricsService.shared.recordSession(duration: duration, text: text)
+        recordingStartTime = nil
+    }
+
+    // MARK: - Express Mode
+
+    func toggleExpressRecording() {
+        if expressActive {
+            expressActive = false
+            stopRecording()
+        } else {
+            expressActive = true
+            startRecording(showOverlay: false)
+            // Safety timer: auto-stop after max duration
+            expressTimer = Timer.scheduledTimer(withTimeInterval: expressMaxDuration, repeats: false) { [weak self] _ in
+                guard let self, self.expressActive else { return }
+                NSLog("[FlowMac] Express mode: auto-stop after \(self.expressMaxDuration)s")
+                DispatchQueue.main.async { self.toggleExpressRecording() }
+            }
+        }
+    }
+
+    // MARK: - Focus Restoration
+
+    private func restoreFocus(then action: @escaping () -> Void) {
+        guard let app = previousApp, !app.isTerminated else {
+            previousApp = nil
+            action()
+            return
+        }
+        NSLog("[FlowMac] Restoring focus to: \(app.localizedName ?? "unknown")")
+        app.activate()
+        previousApp = nil
+        // Brief delay to let the target app become frontmost before injection
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            action()
+        }
+    }
+
+    // MARK: - Sound & Notifications
+
     private func playStartSound() {
-        // Use system sound or custom sound
-        NSSound.beep()
+        guard UserDefaults.standard.bool(forKey: "soundFeedbackEnabled") else { return }
+        NSSound(named: "Ping")?.play()
     }
-    
+
     private func playStopSound() {
-        // Use system sound or custom sound
-        NSSound.beep()
+        guard UserDefaults.standard.bool(forKey: "soundFeedbackEnabled") else { return }
+        NSSound(named: "Glass")?.play()
     }
-    
-    // MARK: - Notifications
-    
-    private func showErrorNotification(message: String) {
-        let notification = UNMutableNotificationContent()
-        notification.title = "Flow Mac"
-        notification.body = message
-        notification.sound = .default
-        
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: notification,
-            trigger: nil
-        )
-        
-        UNUserNotificationCenter.current().add(request)
-    }
-    
-    private func showErrorNotification(error: Error) {
-        showErrorNotification(message: error.localizedDescription)
-    }
-    
+
+
     deinit {
         stopMonitoring()
         NotificationCenter.default.removeObserver(self)
@@ -430,28 +497,7 @@ private func cgEventCallback(
     event: CGEvent,
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
-    guard let refcon = refcon else {
-        return Unmanaged.passRetained(event)
-    }
-    
+    guard let refcon else { return Unmanaged.passUnretained(event) }
     let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
-    
-    let handled = manager.handleCGEvent(event)
-    
-    if handled {
-        return nil // Consume event
-    } else {
-        return Unmanaged.passRetained(event) // Pass through
-    }
-}
-
-// MARK: - Helper Functions
-
-private func fourCharCode(_ string: String) -> Int {
-    guard string.count == 4 else { return 0 }
-    var result: Int = 0
-    for char in string.utf16 {
-        result = (result << 8) + Int(char)
-    }
-    return result
+    return manager.handleCGEvent(event, type: type) ? nil : Unmanaged.passUnretained(event)
 }
