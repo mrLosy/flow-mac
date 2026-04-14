@@ -134,9 +134,8 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
             }
         }
 
-        recordedAudioData = Data()
-
         captureLock.lock()
+        recordedAudioData = Data()
         capturing = true
         captureLock.unlock()
 
@@ -153,6 +152,8 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
 
         captureLock.lock()
         capturing = false
+        let capturedData = recordedAudioData
+        recordedAudioData = Data()
         captureLock.unlock()
 
         DispatchQueue.main.async {
@@ -160,10 +161,9 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
             self.audioLevel = 0.0
         }
 
-        NSLog("[FlowMac] Audio recording stopped, captured \(recordedAudioData.count) bytes")
+        NSLog("[FlowMac] Audio recording stopped, captured \(capturedData.count) bytes")
 
-        let wavData = createWAVFile(from: recordedAudioData)
-        recordedAudioData.removeAll()
+        let wavData = createWAVFile(from: capturedData)
 
         return wavData
     }
@@ -181,7 +181,9 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
             let frameLength = Int(convertedBuffer.frameLength)
             let data = Data(bytes: channelData, count: frameLength * MemoryLayout<Int16>.size)
 
-            recordedAudioData.append(data)
+            self.captureLock.lock()
+            self.recordedAudioData.append(data)
+            self.captureLock.unlock()
 
             // Stream buffer for real-time processing if needed
             DispatchQueue.main.async { [weak self] in
