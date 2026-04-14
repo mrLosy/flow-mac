@@ -9,32 +9,42 @@ class TextInjector: NSObject, ObservableObject, TextInjectionServiceProtocol {
     @Published var lastInjectedText = ""
     weak var injectionDelegate: TextInjectionDelegate?
     
-    /// Insert text into the currently focused text field with Unicode support
-    func insertText(_ text: String) {
-        guard !text.isEmpty else { return }
-        
-        // Method 1: Use Accessibility API (most reliable for native apps)
-        if insertViaAccessibility(text) {
+    /// Insert text into the currently focused text field, or copy to clipboard if no field is focused
+    @discardableResult
+    func insertText(_ text: String) -> TextInsertionResult {
+        guard !text.isEmpty else { return .failed(.insertionFailed) }
+
+        let hasField = hasFocusedTextInput()
+
+        if hasField {
+            // Есть активное текстовое поле — пробуем нативные методы
+            if insertViaAccessibility(text) {
+                lastInjectedText = text
+                injectionDelegate?.textInjectionDidSucceed(text)
+                return .injected
+            }
+
+            if insertViaCGEventUnicode(text) {
+                lastInjectedText = text
+                injectionDelegate?.textInjectionDidSucceed(text)
+                return .injected
+            }
+        }
+
+        // Есть активное приложение — вставляем через Cmd+V (Electron, web-apps и т.д.)
+        if let app = NSWorkspace.shared.frontmostApplication,
+           app.bundleIdentifier.map({ !$0.hasPrefix("com.apple.finder") }) ?? false {
+            pasteViaClipboard(text)
             lastInjectedText = text
             injectionDelegate?.textInjectionDidSucceed(text)
-            return
+            return .injected
         }
-        
-        // Method 2: Use CGEvent with Unicode (good for most apps)
-        if insertViaCGEventUnicode(text) {
-            lastInjectedText = text
-            injectionDelegate?.textInjectionDidSucceed(text)
-            return
-        }
-        
-        // Method 3: Fall back to pasteboard (works everywhere but modifies clipboard)
-        if insertViaPasteboard(text) {
-            lastInjectedText = text
-            injectionDelegate?.textInjectionDidSucceed(text)
-        } else {
-            injectionDelegate?.textInjectionDidFail(with: .insertionFailed)
-            showFailureNotification()
-        }
+
+        // Нет активного приложения / Finder — просто копируем в буфер
+        copyToClipboard(text)
+        lastInjectedText = text
+        showClipboardNotification()
+        return .copiedToClipboard
     }
     
     // MARK: - Method 1: Accessibility API
@@ -118,99 +128,154 @@ class TextInjector: NSObject, ObservableObject, TextInjectionServiceProtocol {
         
         // Create key event with unicode string
         if let keyEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
-            keyEvent.keyboardSetUnicodeString(stringLength: length, unicodeString: buffer)
+            keyEvent.keyboardSetUnicodeString(stringLength: Int(length), unicodeString: buffer)
             keyEvent.post(tap: .cgAnnotatedSessionEventTap)
         }
         
         if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
-            keyUp.keyboardSetUnicodeString(stringLength: length, unicodeString: buffer)
+            keyUp.keyboardSetUnicodeString(stringLength: Int(length), unicodeString: buffer)
             keyUp.post(tap: .cgAnnotatedSessionEventTap)
         }
     }
     
-    // MARK: - Method 3: Pasteboard Fallback
-    
-    private func insertViaPasteboard(_ text: String) -> Bool {
-        let pasteboard = NSPasteboard.general
-        
-        // Save current pasteboard contents
-        let oldTypes = pasteboard.types
-        var oldContents: [NSPasteboard.PasteboardType: Any] = [:]
-        
-        for type in oldTypes ?? [] {
-            if let data = pasteboard.data(forType: type) {
-                oldContents[type] = data
-            }
-        }
-        
-        let oldString = pasteboard.string(forType: .string)
-        
-        // Set new content
-        pasteboard.clearContents()
-        
-        // Set multiple representations for better compatibility
-        guard pasteboard.setString(text, forType: .string) else {
-            // Restore old contents on failure
-            restorePasteboard(oldContents, oldString: oldString)
+    // MARK: - Focus Detection
+
+    /// Проверяет, есть ли фокус на текстовом поле ввода
+    private func hasFocusedTextInput() -> Bool {
+        guard checkAccessibilityPermissions() else {
+            NSLog("[FlowMac] hasFocusedTextInput: no accessibility permissions")
             return false
         }
-        
-        // Also set plain text format
-        if let data = text.data(using: .utf8) {
-            pasteboard.setData(data, forType: NSPasteboard.PasteboardType("public.utf8-plain-text"))
+
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedElement: AnyObject?
+
+        let result = AXUIElementCopyAttributeValue(
+            systemWide,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedElement
+        )
+
+        guard result == .success, let element = focusedElement else {
+            NSLog("[FlowMac] hasFocusedTextInput: no focused element (result=\(result.rawValue))")
+            return false
         }
-        
-        // Simulate Cmd+V
-        postPasteCommand()
-        
-        // Restore original pasteboard content after a delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.restorePasteboard(oldContents, oldString: oldString)
-        }
-        
-        return true
-    }
-    
-    private func restorePasteboard(_ contents: [NSPasteboard.PasteboardType: Any], oldString: String?) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        
-        // Try to restore string first
-        if let oldString = oldString {
-            pasteboard.setString(oldString, forType: .string)
-        }
-        
-        // Restore other contents
-        for (type, data) in contents {
-            if let data = data as? Data {
-                pasteboard.setData(data, forType: type)
+
+        let axElement = element as! AXUIElement
+
+        // Проверяем роль элемента
+        var roleValue: AnyObject?
+        let roleResult = AXUIElementCopyAttributeValue(
+            axElement,
+            kAXRoleAttribute as CFString,
+            &roleValue
+        )
+
+        let role = (roleResult == .success) ? (roleValue as? String) : nil
+
+        // Проверяем subrole
+        var subroleValue: AnyObject?
+        AXUIElementCopyAttributeValue(axElement, kAXSubroleAttribute as CFString, &subroleValue)
+        let subrole = subroleValue as? String
+
+        NSLog("[FlowMac] hasFocusedTextInput: role=\(role ?? "nil"), subrole=\(subrole ?? "nil")")
+
+        if let role = role {
+            let textInputRoles: Set<String> = [
+                kAXTextFieldRole as String,
+                kAXTextAreaRole as String,
+                kAXComboBoxRole as String,
+            ]
+            if textInputRoles.contains(role) {
+                return true
+            }
+
+            // Web-based editors: contenteditable divs appear as AXWebArea or AXGroup
+            if role == "AXWebArea" || role == "AXGroup" {
+                // Проверяем, можно ли установить значение — признак редактируемого элемента
+                var isSettable: DarwinBoolean = false
+                let settableResult = AXUIElementIsAttributeSettable(
+                    axElement,
+                    kAXValueAttribute as CFString,
+                    &isSettable
+                )
+                if settableResult == .success && isSettable.boolValue {
+                    NSLog("[FlowMac] hasFocusedTextInput: web area/group with settable value")
+                    return true
+                }
             }
         }
+
+        // Проверяем subrole для edge cases
+        if let subrole = subrole,
+           subrole == "AXSearchField" || subrole == "AXSecureTextField" {
+            return true
+        }
+
+        // Финальная эвристика: если значение элемента можно установить — он принимает текст
+        var isSettable: DarwinBoolean = false
+        let settableResult = AXUIElementIsAttributeSettable(
+            axElement,
+            kAXValueAttribute as CFString,
+            &isSettable
+        )
+        if settableResult == .success && isSettable.boolValue {
+            NSLog("[FlowMac] hasFocusedTextInput: settable value attribute — treating as text input")
+            return true
+        }
+
+        NSLog("[FlowMac] hasFocusedTextInput: not a text input")
+        return false
     }
-    
-    private func postPasteCommand() {
-        let source = CGEventSource(stateID: .combinedSessionState)
-        
-        let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: 55, keyDown: true)
+
+    // MARK: - Clipboard
+
+    /// Копирует текст в буфер обмена и симулирует Cmd+V для вставки
+    private func pasteViaClipboard(_ text: String) {
+        copyToClipboard(text)
+
+        // Используем .hidSystemState и .cghidEventTap чтобы обойти наш CGEventTap
+        let source = CGEventSource(stateID: .hidSystemState)
+
         let vDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true)
         let vUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)
-        let cmdUp = CGEvent(keyboardEventSource: source, virtualKey: 55, keyDown: false)
-        
+
         vDown?.flags = .maskCommand
         vUp?.flags = .maskCommand
-        
-        cmdDown?.post(tap: .cgAnnotatedSessionEventTap)
-        vDown?.post(tap: .cgAnnotatedSessionEventTap)
-        vUp?.post(tap: .cgAnnotatedSessionEventTap)
-        cmdUp?.post(tap: .cgAnnotatedSessionEventTap)
+
+        vDown?.post(tap: .cghidEventTap)
+        vUp?.post(tap: .cghidEventTap)
     }
-    
+
+    /// Просто копирует текст в буфер обмена (без вставки)
+    private func copyToClipboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
     // MARK: - Helper Methods
     
     /// Check if accessibility permissions are granted
     func checkAccessibilityPermissions() -> Bool {
+        // Стандартная проверка
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
-        return AXIsProcessTrustedWithOptions(options as CFDictionary)
+        if AXIsProcessTrustedWithOptions(options as CFDictionary) {
+            return true
+        }
+
+        // Fallback для debug-билдов: пробуем создать тестовый event tap
+        let testTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: CGEventMask(1 << CGEventType.keyDown.rawValue),
+            callback: { _, _, event, _ in Unmanaged.passRetained(event) },
+            userInfo: nil
+        )
+        guard let tap = testTap else { return false }
+        CGEvent.tapEnable(tap: tap, enable: false)
+        return true
     }
     
     /// Request accessibility permissions
@@ -224,20 +289,14 @@ class TextInjector: NSObject, ObservableObject, TextInjectionServiceProtocol {
         }
     }
     
+    /// Show notification that text was copied to clipboard
+    private func showClipboardNotification() {
+        NotificationService.shared.notifyClipboard()
+    }
+
     /// Show failure notification
     private func showFailureNotification() {
-        let notification = UNMutableNotificationContent()
-        notification.title = "Flow Mac"
-        notification.body = "Failed to insert text. Please check accessibility permissions."
-        notification.sound = .default
-        
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: notification,
-            trigger: nil
-        )
-        
-        UNUserNotificationCenter.current().add(request)
+        NotificationService.shared.notifyInjectionError("Не удалось вставить текст. Проверьте права Accessibility.")
     }
     
     /// Type a single key (for special keys like Return, Tab, etc.)
@@ -267,19 +326,6 @@ class TextInjector: NSObject, ObservableObject, TextInjectionServiceProtocol {
     
     func typeEscape() {
         typeKey(keyCode: 53) // Escape key
-    }
-}
-
-// MARK: - CGEvent Unicode Support Extension
-
-extension CGEvent {
-    func keyboardSetUnicodeString(stringLength: Int, unicodeString: UnsafePointer<UniChar>) {
-        // Use the private API for setting unicode strings
-        // This is the same mechanism used by Apple's Keyboard Viewer
-        let sel = NSSelectorFromString("setUnicodeString:length:")
-        if self.responds(to: sel) {
-            self.perform(sel, with: unicodeString, with: stringLength as NSNumber)
-        }
     }
 }
 

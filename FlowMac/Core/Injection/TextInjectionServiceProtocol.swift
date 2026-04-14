@@ -4,9 +4,9 @@ import Foundation
 protocol TextInjectionServiceProtocol: AnyObject, ObservableObject {
     var lastInjectedText: String { get }
     
-    /// Insert text into the currently focused text field
-    /// - Parameter text: Text to insert
-    func insertText(_ text: String)
+    /// Insert text into the currently focused text field, or copy to clipboard if no field is focused
+    @discardableResult
+    func insertText(_ text: String) -> TextInsertionResult
     
     /// Check if accessibility permissions are granted
     /// - Returns: True if accessibility is enabled
@@ -20,6 +20,13 @@ protocol TextInjectionServiceProtocol: AnyObject, ObservableObject {
 protocol TextInjectionDelegate: AnyObject {
     func textInjectionDidSucceed(_ text: String)
     func textInjectionDidFail(with error: TextInjectionError)
+}
+
+/// Result of text insertion attempt
+enum TextInsertionResult {
+    case injected           // Текст вставлен в активное текстовое поле
+    case copiedToClipboard  // Нет текстового поля — скопировано в буфер обмена
+    case failed(TextInjectionError)
 }
 
 /// Errors that can occur during text injection
