@@ -268,14 +268,14 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
     func startStreamingTranscription(onResult: @escaping (String) -> Void) {
         // For real-time streaming, we use a chunked approach
         // sending audio every N seconds for transcription
-        print("Streaming transcription started")
+        NSLog("[FlowMac] Streaming transcription started")
     }
     
     /// Stop streaming transcription
     func stopStreamingTranscription() {
         streamingTask?.cancel()
         streamingTask = nil
-        print("Streaming transcription stopped")
+        NSLog("[FlowMac] Streaming transcription stopped")
     }
     
     /// Process audio chunk for streaming transcription

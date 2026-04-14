@@ -65,7 +65,8 @@ class TextInjector: NSObject, ObservableObject, TextInjectionServiceProtocol {
             return false
         }
 
-        guard let axElement = element as? AXUIElement else { return false }
+        guard CFGetTypeID(element as CFTypeRef) == AXUIElementGetTypeID() else { return false }
+        let axElement = element as! AXUIElement
 
         // Try to get current value and append (for some text fields)
         var currentValue: AnyObject?
@@ -161,7 +162,8 @@ class TextInjector: NSObject, ObservableObject, TextInjectionServiceProtocol {
             return false
         }
 
-        guard let axElement = element as? AXUIElement else { return false }
+        guard CFGetTypeID(element as CFTypeRef) == AXUIElementGetTypeID() else { return false }
+        let axElement = element as! AXUIElement
 
         // Проверяем роль элемента
         var roleValue: AnyObject?
