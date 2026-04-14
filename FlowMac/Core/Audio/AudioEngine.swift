@@ -61,6 +61,7 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
         applySelectedAudioDeviceIfNeeded()
 
         let inputNode = audioEngine.inputNode
+        inputNode.removeTap(onBus: 0)
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
         guard inputFormat.sampleRate > 0 else {
