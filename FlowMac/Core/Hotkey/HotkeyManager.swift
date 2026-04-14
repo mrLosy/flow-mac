@@ -85,9 +85,19 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
             self, selector: #selector(handleHotkeyChangeNotification(_:)),
             name: .hotkeyDidChange, object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleRetryNotification(_:)),
+            name: .retryTranscription, object: nil
+        )
     }
 
     @objc private func handleToggleNotification() { toggleRecording() }
+
+    @objc private func handleRetryNotification(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let entryID = userInfo["entryID"] as? UUID else { return }
+        retryTranscription(entryID: entryID)
+    }
 
     @objc private func handleHotkeyChangeNotification(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
@@ -325,6 +335,11 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
             return
         }
 
+        // Save audio to disk before transcription so we can retry on failure
+        let entryID = UUID()
+        let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+        let audioFileName = AudioStorageService.shared.save(audioData: audioData, id: entryID)
+
         recognitionService.transcribe(audioData: audioData) { [weak self] result in
             DispatchQueue.main.async {
                 switch result {
@@ -332,6 +347,7 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
                     let cleanedText = TranscriptionCleaner.clean(text)
                     guard !cleanedText.isEmpty else {
                         NotificationService.shared.notifyNoSpeech()
+                        if let fileName = audioFileName { AudioStorageService.shared.delete(fileName: fileName) }
                         return
                     }
                     // Semantic correction (optional LLM post-processing)
@@ -346,17 +362,39 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
                                 self?.recordSuccessMetrics(text: finalText)
                             case .copiedToClipboard:
                                 NSLog("[FlowMac] No text field focused — copied to clipboard")
-                                NotificationService.shared.notifyClipboard()
+                                let accessibilityOK = AXIsProcessTrustedWithOptions(
+                                    [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
+                                )
+                                if !accessibilityOK {
+                                    NotificationService.shared.notifyAccessibilityHint()
+                                } else {
+                                    NotificationService.shared.notifyClipboard()
+                                }
                                 self?.recordSuccessMetrics(text: finalText)
                             case .failed(let error):
                                 NSLog("[FlowMac] Text injection failed: \(error.localizedDescription)")
                                 NotificationService.shared.notifyInjectionError(error.localizedDescription)
                             }
+                            // Audio transcribed successfully — delete the saved file
+                            if let fileName = audioFileName { AudioStorageService.shared.delete(fileName: fileName) }
                         }
                     }
                 case .failure(let error):
                     NSLog("[FlowMac] Transcription error: \(error)")
                     NotificationService.shared.notifyTranscriptionError(error.localizedDescription)
+                    self?.recordingStartTime = nil
+                    // Save failed entry with audio reference for retry
+                    if let fileName = audioFileName {
+                        let failedEntry = PersistentTranscriptionEntry(
+                            failedWithID: entryID,
+                            duration: duration,
+                            provider: TranscriptionProvider.current.displayName,
+                            audioFileName: fileName,
+                            errorMessage: error.localizedDescription
+                        )
+                        TranscriptionHistoryService.shared.add(failedEntry)
+                        NSLog("[FlowMac] Saved failed transcription entry %@ with audio %@", entryID.uuidString, fileName)
+                    }
                 }
             }
         }
@@ -432,6 +470,48 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
         TranscriptionHistoryService.shared.add(text: text, provider: TranscriptionProvider.current.displayName)
         UsageMetricsService.shared.recordSession(duration: duration, text: text)
         recordingStartTime = nil
+    }
+
+    // MARK: - Retry
+
+    func retryTranscription(entryID: UUID) {
+        guard !recognitionService.isProcessing else {
+            NSLog("[FlowMac] Retry skipped — transcription already in progress")
+            return
+        }
+        guard let entry = TranscriptionHistoryService.shared.entry(withID: entryID),
+              entry.status == .failed,
+              let audioFileName = entry.audioFileName,
+              let audioData = AudioStorageService.shared.load(fileName: audioFileName) else {
+            NSLog("[FlowMac] Retry failed: entry not found or audio missing for %@", entryID.uuidString)
+            return
+        }
+
+        NSLog("[FlowMac] Retrying transcription for entry %@", entryID.uuidString)
+
+        recognitionService.transcribe(audioData: audioData) { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let text):
+                    let cleanedText = TranscriptionCleaner.clean(text)
+                    guard !cleanedText.isEmpty else {
+                        TranscriptionHistoryService.shared.updateError(id: entryID, message: "Речь не обнаружена")
+                        return
+                    }
+                    TranscriptionHistoryService.shared.markAsSucceeded(id: entryID, text: cleanedText)
+                    AudioStorageService.shared.delete(fileName: audioFileName)
+                    UsageMetricsService.shared.recordSession(duration: entry.duration, text: cleanedText)
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(cleanedText, forType: .string)
+                    NotificationService.shared.notifyRetrySuccess()
+                    NSLog("[FlowMac] Retry succeeded for entry %@", entryID.uuidString)
+                case .failure(let error):
+                    NSLog("[FlowMac] Retry failed for entry %@: %@", entryID.uuidString, error.localizedDescription)
+                    TranscriptionHistoryService.shared.updateError(id: entryID, message: error.localizedDescription)
+                    NotificationService.shared.notifyTranscriptionError(error.localizedDescription)
+                }
+            }
+        }
     }
 
     // MARK: - Express Mode

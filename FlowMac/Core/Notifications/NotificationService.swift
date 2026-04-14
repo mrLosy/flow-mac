@@ -37,14 +37,6 @@ final class NotificationService {
             return .noAPIKey(provider: provider.displayName)
         }
 
-        // 3. Accessibility (нужен для вставки текста)
-        let accessibilityOK = AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
-        )
-        if !accessibilityOK {
-            return .accessibilityDenied
-        }
-
         return nil
     }
 
@@ -87,11 +79,28 @@ final class NotificationService {
         )
     }
 
+    func notifyAccessibilityHint() {
+        send(
+            title: "Текст скопирован в буфер обмена",
+            body: "Включите Accessibility для прямой вставки текста",
+            category: "INFO",
+            actionURL: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        )
+    }
+
     func notifyNoSpeech() {
         send(
             title: "Речь не распознана",
             body: "Попробуйте говорить громче или ближе к микрофону",
             category: "RECORDING_WARNING"
+        )
+    }
+
+    func notifyRetrySuccess() {
+        send(
+            title: "Повторная транскрипция",
+            body: "Текст скопирован в буфер обмена",
+            category: "INFO"
         )
     }
 
