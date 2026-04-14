@@ -1,19 +1,63 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import Carbon
 
-/// Settings view for the app
+enum SettingsTab: String, CaseIterable, Identifiable {
+    case general = "General"
+    case shortcuts = "Shortcuts"
+    case audio = "Audio"
+    case statistics = "Statistics"
+    case about = "About"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .general: return "gearshape"
+        case .shortcuts: return "keyboard"
+        case .audio: return "waveform"
+        case .statistics: return "chart.bar"
+        case .about: return "info.circle"
+        }
+    }
+}
+
 struct SettingsView: View {
-    @State private var apiKey = ""
-    @State private var selectedLanguage = "auto"
-    @State private var hotkeyKeyCode: UInt16 = 49 // Space
-    @State private var hotkeyModifiers: NSEvent.ModifierFlags = [.command, .shift]
-    @State private var showAccessibilityAlert = false
-    @State private var hasAccessibilityPermission = false
-    @State private var hasMicrophonePermission = false
-    @State private var availableInputDevices: [AVAudioDevice] = []
-    @State private var selectedDeviceID: String = "default"
-    
+    @State var selectedTab: SettingsTab = .general
+
+    // Provider state
+    @State var activeProvider: TranscriptionProvider = .current
+    @State var providerAPIKeys: [TranscriptionProvider: String] = [:]
+    @State var showAddKeyForm = false
+    @State var addFormProvider: TranscriptionProvider = .groq
+    @State var addFormKey = ""
+    @State var addFormValidating = false
+    @State var addFormError: String?
+
+    // Other settings
+    @State var selectedLanguage = "auto"
+    @State var hotkeyKeyCode: UInt16 = 49
+    @State var hotkeyModifiers: NSEvent.ModifierFlags = [.command, .shift]
+    @State var pttKeyCode: UInt16 = 2  // D key
+    @State var pttModifiers: NSEvent.ModifierFlags = [.command, .shift]
+    @State var expressKeyCode: UInt16 = 0
+    @State var expressModifiers: NSEvent.ModifierFlags = []
+    @State var transcriptionPrompt: String = ""
+    @State var showAccessibilityAlert = false
+    @State var hasAccessibilityPermission = false
+    @State var hasMicrophonePermission = false
+    @State var toggleModeEnabled = UserDefaults.standard.object(forKey: "toggleModeEnabled") == nil ? true : UserDefaults.standard.bool(forKey: "toggleModeEnabled")
+    @State var pttModeEnabled = UserDefaults.standard.object(forKey: "pttModeEnabled") == nil ? true : UserDefaults.standard.bool(forKey: "pttModeEnabled")
+    @State var expressModeEnabled = UserDefaults.standard.bool(forKey: "expressModeEnabled")
+    @State var soundFeedbackEnabled = UserDefaults.standard.bool(forKey: "soundFeedbackEnabled")
+    @State var showMicTestAlert = false
+    @State var micTestGranted = false
+    @State var availableInputDevices: [AVAudioDevice] = []
+    @State var selectedDeviceID: String = "default"
+    @State var autoBoostMicVolume = UserDefaults.standard.bool(forKey: "autoBoostMicVolume")
+    @State var semanticCorrectionEnabled = UserDefaults.standard.bool(forKey: "semanticCorrectionEnabled")
+
     let languages = [
         ("auto", "Auto-detect"),
         ("en", "English"),
@@ -27,582 +71,321 @@ struct SettingsView: View {
         ("ko", "Korean"),
         ("zh", "Chinese"),
     ]
-    
+
+    var configuredProviders: [TranscriptionProvider] {
+        TranscriptionProvider.allCases.filter { providerAPIKeys[$0]?.isEmpty == false }
+    }
+
+    var unconfiguredProviders: [TranscriptionProvider] {
+        TranscriptionProvider.allCases.filter { providerAPIKeys[$0]?.isEmpty != false }
+    }
+
     var body: some View {
-        TabView {
-            generalTab
-                .tabItem {
-                    Label("General", systemImage: "gear")
-                }
-            
-            shortcutsTab
-                .tabItem {
-                    Label("Shortcuts", systemImage: "keyboard")
-                }
-            
-            audioTab
-                .tabItem {
-                    Label("Audio", systemImage: "mic")
-                }
-            
-            aboutTab
-                .tabItem {
-                    Label("About", systemImage: "info.circle")
-                }
+        HStack(spacing: 0) {
+            sidebar
+            Divider()
+            contentArea
         }
-        .frame(width: 520, height: 400)
+        .frame(width: 640, height: 460)
         .onAppear {
             loadSettings()
-            checkPermissions()
             loadAudioDevices()
+            // Slight delay ensures the window is fully set up before TCC query
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                checkPermissions()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            checkPermissions()
         }
         .alert("Accessibility Permission Required", isPresented: $showAccessibilityAlert) {
-            Button("Open System Settings") {
-                openAccessibilitySettings()
-            }
+            Button("Open System Settings") { openAccessibilitySettings() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Flow Mac needs accessibility permission to inject text into other applications. Please grant this permission in System Settings.")
+            Text("Flow Mac needs accessibility permission to inject text.")
+        }
+        .alert(micTestGranted ? "Microphone Test" : "Microphone Access Denied", isPresented: $showMicTestAlert) {
+            if !micTestGranted {
+                Button("Open System Settings") { openMicrophoneSettings() }
+            }
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(micTestGranted
+                ? "Microphone access granted. You can now use voice dictation."
+                : "Please enable microphone access in System Settings.")
         }
     }
-    
-    // MARK: - Tabs
-    
-    private var generalTab: some View {
-        Form {
-            Section(header: Text("API Configuration").font(.headline)) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("OpenAI API Key")
-                        .font(.system(size: 13, weight: .medium))
-                    
-                    SecureField("sk-...", text: $apiKey)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                        .font(.system(.body, design: .monospaced))
-                        .onChange(of: apiKey) { _ in
-                            saveAPIKey()
-                        }
-                    
-                    Text("Your API key is stored in UserDefaults (Keychain support coming soon).")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.vertical, 8)
-                
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Recognition Language")
-                        .font(.system(size: 13, weight: .medium))
-                    
-                    Picker("", selection: $selectedLanguage) {
-                        ForEach(languages, id: \.0) { code, name in
-                            Text(name).tag(code)
-                        }
-                    }
-                    .pickerStyle(MenuPickerStyle())
-                    .onChange(of: selectedLanguage) { _ in
-                        saveLanguage()
-                    }
-                    
-                    Text("Select your primary language for better accuracy.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.vertical, 8)
-            }
-            
-            Section(header: Text("Permissions").font(.headline)) {
-                HStack {
-                    Image(systemName: hasAccessibilityPermission ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                        .foregroundColor(hasAccessibilityPermission ? .green : .orange)
-                        .font(.title3)
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Accessibility Permission")
-                            .font(.subheadline)
-                        Text("Required for text injection")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    Spacer()
-                    
-                    if !hasAccessibilityPermission {
-                        Button("Grant") {
-                            showAccessibilityAlert = true
-                        }
-                        .buttonStyle(BorderedButtonStyle())
-                    }
-                }
-                .padding(.vertical, 4)
-                
-                HStack {
-                    Image(systemName: hasMicrophonePermission ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                        .foregroundColor(hasMicrophonePermission ? .green : .orange)
-                        .font(.title3)
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Microphone Permission")
-                            .font(.subheadline)
-                        Text("Required for voice recording")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    Spacer()
-                    
-                    if !hasMicrophonePermission {
-                        Button("Grant") {
-                            openMicrophoneSettings()
-                        }
-                        .buttonStyle(BorderedButtonStyle())
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-        }
-        .padding()
-    }
-    
-    private var shortcutsTab: some View {
-        Form {
-            Section(header: Text("Global Shortcut").font(.headline)) {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Press the key combination you want to use to activate Flow Mac:")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                    
-                    HStack {
-                        Text("Current shortcut:")
-                            .font(.subheadline)
-                        
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(SettingsTab.allCases) { tab in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { selectedTab = tab }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: tab.icon)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(selectedTab == tab ? .white : .secondary)
+                            .frame(width: 20)
+                        Text(tab.rawValue)
+                            .font(.system(size: 13, weight: selectedTab == tab ? .semibold : .regular))
+                            .foregroundColor(selectedTab == tab ? .white : .primary)
                         Spacer()
-                        
-                        ShortcutRecorderView(
-                            keyCode: $hotkeyKeyCode,
-                            modifiers: $hotkeyModifiers
-                        )
-                        .frame(width: 160, height: 36)
                     }
-                    
-                    Text("Default: ⌘ + ⇧ + Space (Command + Shift + Space)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.top, 4)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(selectedTab == tab ? Color.accentColor : Color.clear)
+                    )
+                    .contentShape(Rectangle())
                 }
-                .padding(.vertical, 8)
+                .buttonStyle(.plain)
             }
-            
-            Section(header: Text("How to Use").font(.headline)) {
-                VStack(alignment: .leading, spacing: 12) {
-                    stepView(number: 1, text: "Press the global shortcut to start recording")
-                    stepView(number: 2, text: "Speak clearly into your microphone")
-                    stepView(number: 3, text: "Press again or wait for silence to stop")
-                    stepView(number: 4, text: "Text will be automatically inserted at cursor")
-                }
-                .padding(.vertical, 8)
-            }
-        }
-        .padding()
-    }
-    
-    private func stepView(number: Int, text: String) -> some View {
-        HStack(spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(Color.accentColor.opacity(0.2))
-                    .frame(width: 24, height: 24)
-                
-                Text("\(number)")
-                    .font(.caption)
-                    .fontWeight(.bold)
-                    .foregroundColor(.accentColor)
-            }
-            
-            Text(text)
-                .font(.subheadline)
-            
             Spacer()
         }
+        .padding(12)
+        .frame(width: 180)
+        .background(.ultraThinMaterial)
     }
-    
-    private var audioTab: some View {
-        Form {
-            Section(header: Text("Audio Input").font(.headline)) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Audio Device")
-                        .font(.system(size: 13, weight: .medium))
-                    
-                    // macOS audio device picker
-                    Picker("", selection: $selectedDeviceID) {
-                        Text("Default Microphone").tag("default")
-                        ForEach(availableInputDevices) { device in
-                            Text(device.name).tag(device.id)
-                        }
-                    }
-                    .pickerStyle(MenuPickerStyle())
-                    .onChange(of: selectedDeviceID) { newValue in
-                        UserDefaults.standard.set(newValue, forKey: "selectedAudioDevice")
-                    }
-                    
-                    Text("Select the microphone you want to use for voice input.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+
+    private var contentArea: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(selectedTab.rawValue)
+                    .font(.system(size: 20, weight: .semibold))
+                    .padding(.bottom, 20)
+
+                switch selectedTab {
+                case .general: generalContent
+                case .shortcuts: shortcutsContent
+                case .audio: audioContent
+                case .statistics: UsageMetricsView()
+                case .about: aboutContent
                 }
-                .padding(.vertical, 8)
             }
-            
-            Section(header: Text("Audio Quality").font(.headline)) {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("Sample Rate")
-                        Spacer()
-                        Text("16 kHz (Optimal for Whisper)")
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    HStack {
-                        Text("Format")
-                        Spacer()
-                        Text("16-bit PCM Mono")
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    HStack {
-                        Text("Buffer Size")
-                        Spacer()
-                        Text("4096 samples")
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .font(.subheadline)
-                .padding(.vertical, 8)
-            }
-            
-            Section(header: Text("Test").font(.headline)) {
-                Button("Test Microphone") {
-                    testMicrophone()
-                }
-                .buttonStyle(BorderedProminentButtonStyle())
-                .controlSize(.regular)
-            }
+            .padding(28)
         }
-        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
-    
-    private var aboutTab: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "waveform.circle.fill")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 64, height: 64)
-                .foregroundColor(.accentColor)
-            
-            Text("Flow Mac")
-                .font(.largeTitle)
-                .fontWeight(.bold)
-            
-            Text("Version 1.0.0")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-            
-            Text("AI-powered voice dictation for macOS")
-                .font(.body)
-                .multilineTextAlignment(.center)
-                .foregroundColor(.secondary)
-            
-            Divider()
-                .padding(.horizontal, 40)
-            
-            VStack(alignment: .leading, spacing: 10) {
-                Link(destination: URL(string: "https://openai.com/whisper")!) {
-                    Label("Powered by OpenAI Whisper", systemImage: "waveform")
-                }
-                
-                Link(destination: URL(string: "https://github.com/flowmac/flow-mac")!) {
-                    Label("GitHub Repository", systemImage: "curlybraces")
-                }
-                
-                Link(destination: URL(string: "https://github.com/flowmac/flow-mac/issues")!) {
-                    Label("Report an Issue", systemImage: "exclamationmark.bubble")
-                }
-            }
-            .font(.subheadline)
-            
-            Spacer()
-            
-            Text("© 2026 Flow Mac. All rights reserved.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-    
-    // MARK: - Helper Methods
-    
-    private func loadSettings() {
-        apiKey = UserDefaults.standard.string(forKey: "whisperAPIKey") ?? ""
+
+    // MARK: - Persistence
+
+    func loadSettings() {
+        TranscriptionProvider.migrateIfNeeded()
+        activeProvider = .current
+        providerAPIKeys = Dictionary(
+            uniqueKeysWithValues: TranscriptionProvider.allCases.map { ($0, $0.apiKey) }
+        )
         selectedLanguage = UserDefaults.standard.string(forKey: "recognitionLanguage") ?? "auto"
         selectedDeviceID = UserDefaults.standard.string(forKey: "selectedAudioDevice") ?? "default"
-        
-        if let savedKeyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? UInt16 {
-            hotkeyKeyCode = savedKeyCode
+        // Toggle hotkey (migrated keys or new keys)
+        if let savedKeyCode = UserDefaults.standard.object(forKey: "toggleHotkeyKeyCode") as? UInt32 {
+            hotkeyKeyCode = UInt16(savedKeyCode)
+        } else if let savedKeyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? UInt32 {
+            hotkeyKeyCode = UInt16(savedKeyCode)
         }
-        
-        if let savedModifiers = UserDefaults.standard.object(forKey: "hotkeyModifiersRaw") as? UInt {
-            hotkeyModifiers = NSEvent.ModifierFlags(rawValue: savedModifiers)
+        if let savedModifiers = UserDefaults.standard.object(forKey: "toggleHotkeyModifiers") as? UInt32 {
+            hotkeyModifiers = carbonToNSEventModifiers(savedModifiers)
+        } else if let savedModifiers = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt32 {
+            hotkeyModifiers = carbonToNSEventModifiers(savedModifiers)
+        }
+        // PTT hotkey
+        if let savedKeyCode = UserDefaults.standard.object(forKey: "pttHotkeyKeyCode") as? UInt32 {
+            pttKeyCode = UInt16(savedKeyCode)
+        }
+        if let savedModifiers = UserDefaults.standard.object(forKey: "pttHotkeyModifiers") as? UInt32 {
+            pttModifiers = carbonToNSEventModifiers(savedModifiers)
+        }
+        // Express hotkey
+        if let savedKeyCode = UserDefaults.standard.object(forKey: "expressHotkeyKeyCode") as? UInt32 {
+            expressKeyCode = UInt16(savedKeyCode)
+        }
+        if let savedModifiers = UserDefaults.standard.object(forKey: "expressHotkeyModifiers") as? UInt32 {
+            expressModifiers = carbonToNSEventModifiers(savedModifiers)
+        }
+        // Transcription prompt
+        transcriptionPrompt = UserDefaults.standard.string(forKey: "transcriptionPrompt") ?? ""
+    }
+
+    func activateProvider(_ provider: TranscriptionProvider) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            activeProvider = provider
+            TranscriptionProvider.current = provider
         }
     }
-    
-    private func saveAPIKey() {
-        UserDefaults.standard.set(apiKey, forKey: "whisperAPIKey")
+
+    func removeProviderKey(_ provider: TranscriptionProvider) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            provider.apiKey = ""
+            providerAPIKeys[provider] = ""
+            if activeProvider == provider {
+                if let first = configuredProviders.first {
+                    activateProvider(first)
+                }
+            }
+        }
     }
-    
-    private func saveLanguage() {
+
+    func openAddForm() {
+        let firstUnconfigured = unconfiguredProviders.first ?? .groq
+        addFormProvider = firstUnconfigured
+        addFormKey = ""
+        addFormError = nil
+        addFormValidating = false
+        withAnimation(.easeInOut(duration: 0.25)) {
+            showAddKeyForm = true
+        }
+    }
+
+    func cancelAddForm() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showAddKeyForm = false
+            addFormKey = ""
+            addFormError = nil
+        }
+    }
+
+    func submitAddForm() {
+        let key = addFormKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            addFormError = "Enter an API key"
+            return
+        }
+
+        addFormValidating = true
+        addFormError = nil
+
+        TranscriptionProvider.validate(provider: addFormProvider, key: key) { result in
+            addFormValidating = false
+            switch result {
+            case .success:
+                addFormProvider.apiKey = key
+                providerAPIKeys[addFormProvider] = key
+                if configuredProviders.count == 1 || activeProvider == addFormProvider {
+                    activateProvider(addFormProvider)
+                }
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showAddKeyForm = false
+                    addFormKey = ""
+                }
+            case .failure(let error):
+                addFormError = error.localizedDescription
+            }
+        }
+    }
+
+    func saveLanguage() {
         UserDefaults.standard.set(selectedLanguage, forKey: "recognitionLanguage")
     }
-    
-    private func checkPermissions() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
-        hasAccessibilityPermission = AXIsProcessTrustedWithOptions(options as CFDictionary)
-        hasMicrophonePermission = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+
+    func checkPermissions() {
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
+        let a11y = AXIsProcessTrustedWithOptions(opts as CFDictionary)
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        NSLog("[FlowMac Settings] checkPermissions — Accessibility: \(a11y), Mic status: \(micStatus.rawValue)")
+        hasAccessibilityPermission = a11y
+        hasMicrophonePermission = micStatus == .authorized
     }
-    
-    private func openAccessibilitySettings() {
+
+    func requestMicrophonePermission() {
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        if micStatus == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { _ in
+                DispatchQueue.main.async { self.checkPermissions() }
+            }
+        } else {
+            openMicrophoneSettings()
+        }
+    }
+
+    func openAccessibilitySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
     }
-    
-    private func openMicrophoneSettings() {
+
+    func openMicrophoneSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
             NSWorkspace.shared.open(url)
         }
     }
-    
-    private func loadAudioDevices() {
-        // Get available audio input devices using AVAudioEngine
-        let audioSession = AVAudioEngine()
-        let inputNode = audioSession.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-        
-        // Query available input devices using Core Audio
+
+    func loadAudioDevices() {
         var devices: [AVAudioDevice] = []
-        
-        var propertySize: UInt32 = 0
-        var address = AudioObjectPropertyAddress(
+        var propSize: UInt32 = 0
+        var addr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        
-        let systemObjectID = AudioObjectID(kAudioObjectSystemObject)
-        var result = AudioObjectGetPropertyDataSize(systemObjectID, &address, 0, nil, &propertySize)
-        
-        if result == noErr {
-            let deviceCount = Int(propertySize) / MemoryLayout<AudioObjectID>.size
-            var deviceIDs = [AudioObjectID](repeating: 0, count: deviceCount)
-            
-            result = AudioObjectGetPropertyData(systemObjectID, &address, 0, nil, &propertySize, &deviceIDs)
-            
-            if result == noErr {
-                for deviceID in deviceIDs {
-                    // Check if device is an input device
-                    var inputAddress = AudioObjectPropertyAddress(
-                        mSelector: kAudioDevicePropertyStreamConfiguration,
-                        mScope: kAudioDevicePropertyScopeInput,
-                        mElement: 0
-                    )
-                    
-                    var streamConfigSize: UInt32 = 0
-                    result = AudioObjectGetPropertyDataSize(deviceID, &inputAddress, 0, nil, &streamConfigSize)
-                    
-                    if result == noErr && streamConfigSize > 0 {
-                        // Get device name
-                        var nameAddress = AudioObjectPropertyAddress(
-                            mSelector: kAudioObjectPropertyName,
-                            mScope: kAudioObjectPropertyScopeGlobal,
-                            mElement: kAudioObjectPropertyElementMain
-                        )
-                        
-                        var deviceName: CFString = "" as CFString
-                        var nameSize = UInt32(MemoryLayout<CFString>.size)
-                        result = AudioObjectGetPropertyData(deviceID, &nameAddress, 0, nil, &nameSize, &deviceName)
-                        
-                        if result == noErr {
-                            let name = deviceName as String
-                            devices.append(AVAudioDevice(id: String(deviceID), name: name, objectID: deviceID))
-                        }
-                    }
-                }
+        let sysID = AudioObjectID(kAudioObjectSystemObject)
+        var res = AudioObjectGetPropertyDataSize(sysID, &addr, 0, nil, &propSize)
+        guard res == noErr else { return }
+
+        let count = Int(propSize) / MemoryLayout<AudioObjectID>.size
+        var ids = [AudioObjectID](repeating: 0, count: count)
+        res = AudioObjectGetPropertyData(sysID, &addr, 0, nil, &propSize, &ids)
+        guard res == noErr else { return }
+
+        for devID in ids {
+            var inAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreamConfiguration,
+                mScope: kAudioDevicePropertyScopeInput,
+                mElement: 0
+            )
+            var streamSize: UInt32 = 0
+            res = AudioObjectGetPropertyDataSize(devID, &inAddr, 0, nil, &streamSize)
+            guard res == noErr, streamSize > 0 else { continue }
+
+            var nameAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioObjectPropertyName,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var name: CFString = "" as CFString
+            var nameSize = UInt32(MemoryLayout<CFString>.size)
+            res = AudioObjectGetPropertyData(devID, &nameAddr, 0, nil, &nameSize, &name)
+            if res == noErr {
+                devices.append(AVAudioDevice(id: String(devID), name: name as String, objectID: devID))
             }
         }
-        
         availableInputDevices = devices
     }
-    
-    private func testMicrophone() {
-        // Request permission if needed
+
+    func testMicrophone() {
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             DispatchQueue.main.async {
-                if granted {
-                    let alert = NSAlert()
-                    alert.messageText = "Microphone Test"
-                    alert.informativeText = "Microphone access granted. You can now use voice dictation."
-                    alert.alertStyle = .informational
-                    alert.runModal()
-                } else {
-                    let alert = NSAlert()
-                    alert.messageText = "Microphone Access Denied"
-                    alert.informativeText = "Please enable microphone access in System Settings to use Flow Mac."
-                    alert.alertStyle = .warning
-                    alert.runModal()
-                }
+                self.micTestGranted = granted
+                self.hasMicrophonePermission = granted
+                self.showMicTestAlert = true
             }
         }
     }
-}
 
-// MARK: - Audio Device Model
+    // MARK: - Helpers
 
-struct AVAudioDevice: Identifiable {
-    let id: String
-    let name: String
-    let objectID: AudioObjectID
-}
+    var shortcutConflict: Bool {
+        hotkeyKeyCode == pttKeyCode && hotkeyModifiers == pttModifiers
+    }
 
-// MARK: - Supporting Views
+    func carbonToNSEventModifiers(_ carbon: UInt32) -> NSEvent.ModifierFlags {
+        var flags: NSEvent.ModifierFlags = []
+        if (carbon & UInt32(cmdKey)) != 0 { flags.insert(.command) }
+        if (carbon & UInt32(shiftKey)) != 0 { flags.insert(.shift) }
+        if (carbon & UInt32(optionKey)) != 0 { flags.insert(.option) }
+        if (carbon & UInt32(controlKey)) != 0 { flags.insert(.control) }
+        return flags
+    }
 
-struct ShortcutRecorderView: NSViewRepresentable {
-    @Binding var keyCode: UInt16
-    @Binding var modifiers: NSEvent.ModifierFlags
-    
-    func makeNSView(context: Context) -> ShortcutRecorder {
-        let recorder = ShortcutRecorder()
-        recorder.onShortcutChanged = { code, mods in
-            keyCode = code
-            modifiers = mods
-            
-            // Save to UserDefaults
-            UserDefaults.standard.set(code, forKey: "hotkeyKeyCode")
-            UserDefaults.standard.set(mods.rawValue, forKey: "hotkeyModifiersRaw")
-        }
-        return recorder
-    }
-    
-    func updateNSView(_ nsView: ShortcutRecorder, context: Context) {}
-}
-
-class ShortcutRecorder: NSView {
-    var onShortcutChanged: ((UInt16, NSEvent.ModifierFlags) -> Void)?
-    
-    private var currentKeyCode: UInt16 = 49  // Space
-    private var currentModifiers: NSEvent.ModifierFlags = [.command, .shift]
-    private var isRecording = false
-    
-    override var acceptsFirstResponder: Bool { true }
-    
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        
-        // Draw background
-        if isRecording {
-            NSColor.systemRed.withAlphaComponent(0.1).setFill()
-            NSColor.systemRed.setStroke()
-        } else {
-            NSColor.controlBackgroundColor.setFill()
-            NSColor.separatorColor.setStroke()
-        }
-        
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6)
-        path.fill()
-        path.lineWidth = isRecording ? 2 : 1
-        path.stroke()
-        
-        // Draw shortcut text
-        let shortcutText = shortcutString()
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
-            .foregroundColor: isRecording ? NSColor.systemRed : NSColor.label
-        ]
-        
-        let size = shortcutText.size(withAttributes: attributes)
-        let point = NSPoint(
-            x: (bounds.width - size.width) / 2,
-            y: (bounds.height - size.height) / 2
-        )
-        
-        shortcutText.draw(at: point, withAttributes: attributes)
-    }
-    
-    override func mouseDown(with event: NSEvent) {
-        isRecording = !isRecording
-        if isRecording {
-            window?.makeFirstResponder(self)
-        }
-        setNeedsDisplay(bounds)
-    }
-    
-    override func keyDown(with event: NSEvent) {
-        guard isRecording else { return }
-        
-        // Don't allow just modifiers
-        let modifiersOnly: NSEvent.ModifierFlags = [.command, .option, .control, .shift, .function, .help]
-        if modifiersOnly.contains(event.modifierFlags) && event.keyCode >= 54 && event.keyCode <= 63 {
-            return // Just a modifier key, ignore
-        }
-        
-        currentKeyCode = event.keyCode
-        currentModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        
-        onShortcutChanged?(currentKeyCode, currentModifiers)
-        
-        isRecording = false
-        setNeedsDisplay(bounds)
-    }
-    
-    override func flagsChanged(with event: NSEvent) {
-        // Handle modifier-only changes
-    }
-    
-    private func shortcutString() -> String {
-        if isRecording {
-            return "Recording..."
-        }
-        
-        var parts: [String] = []
-        
-        if currentModifiers.contains(.command) { parts.append("⌘") }
-        if currentModifiers.contains(.option) { parts.append("⌥") }
-        if currentModifiers.contains(.control) { parts.append("⌃") }
-        if currentModifiers.contains(.shift) { parts.append("⇧") }
-        
-        let keyNames: [UInt16: String] = [
-            49: "Space",
-            36: "↵",
-            51: "⌫",
-            53: "Esc",
-            48: "⇥",
-            123: "←",
-            124: "→",
-            125: "↓",
-            126: "↑",
-        ]
-        
-        if let keyName = keyNames[currentKeyCode] {
-            parts.append(keyName)
-        } else if currentKeyCode >= 0 && currentKeyCode <= 25 {
-            let letter = Character(UnicodeScalar(currentKeyCode + 65)!)
-            parts.append(String(letter))
-        } else {
-            // Try to get the character from keyCode
-            parts.append("Key\(currentKeyCode)")
-        }
-        
-        return parts.joined(separator: "")
+    func maskedKey(_ key: String) -> String {
+        guard key.count > 8 else { return String(repeating: "\u{2022}", count: 8) }
+        let prefix = String(key.prefix(4))
+        let suffix = String(key.suffix(4))
+        return "\(prefix)\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\(suffix)"
     }
 }
-
-// MARK: - Preview
 
 struct SettingsView_Previews: PreviewProvider {
     static var previews: some View {

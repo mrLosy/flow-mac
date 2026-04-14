@@ -2,276 +2,219 @@ import SwiftUI
 import AppKit
 import Combine
 
-/// Floating overlay window showing recording status with audio visualization
+private let kExpandedWidth: CGFloat = 128
+private let kExpandedHeight: CGFloat = 36
+private let kIdleWidth: CGFloat = 40
+private let kIdleHeight: CGFloat = 4
+private let kWindowPadding: CGFloat = 24
+private let kWindowWidth: CGFloat = kExpandedWidth + kWindowPadding * 2
+private let kWindowHeight: CGFloat = kExpandedHeight + kWindowPadding * 2
+
+/// Always-visible bottom-center pill: idle = tiny bar, recording = expanded with waveform
+@MainActor
 class RecordingOverlayWindow: NSObject, ObservableObject {
     private var window: NSWindow?
-    private var hostingView: NSHostingView<RecordingOverlayView>?
-    
+    private var screenTrackingTimer: Timer?
+    private var lastScreenFrame: NSRect = .zero
+
     @Published var audioLevel: Float = 0.0
-    @Published var isRecording = false
-    
-    private var cancellables = Set<AnyCancellable>()
-    
+    @Published var isRecording = false {
+        didSet {
+            if isRecording {
+                startScreenTracking()
+            } else {
+                stopScreenTracking()
+            }
+        }
+    }
+
     override init() {
         super.init()
         setupWindow()
     }
-    
+
     private func setupWindow() {
-        let contentView = RecordingOverlayView(
-            audioLevel: $audioLevel,
-            isRecording: $isRecording
-        )
-        
-        hostingView = NSHostingView(rootView: contentView)
-        
-        window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+        let hosting = NSHostingView(rootView: RecordingOverlayView(overlay: self))
+
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: kWindowWidth, height: kWindowHeight),
             styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        
-        window?.contentView = hostingView
-        window?.isOpaque = false
-        window?.backgroundColor = .clear
-        window?.hasShadow = false
-        window?.level = .floating
-        window?.ignoresMouseEvents = true
-        window?.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        
-        // Position window at center of screen
+        win.contentView = hosting
+        win.isOpaque = false
+        win.backgroundColor = .clear
+        win.hasShadow = false
+        win.level = .statusBar
+        win.ignoresMouseEvents = true
+        win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        window = win
         positionWindow()
+        win.orderFrontRegardless()
     }
-    
+
     private func positionWindow() {
-        guard let screenFrame = NSScreen.main?.visibleFrame else { return }
-        
-        let windowSize: CGFloat = 200
-        let x = screenFrame.midX - windowSize / 2
-        let y = screenFrame.midY - windowSize / 2
-        
-        window?.setFrame(NSRect(x: x, y: y, width: windowSize, height: windowSize), display: false)
+        guard let screen = activeScreen() else { return }
+        let sf = screen.frame
+        let x = sf.midX - kWindowWidth / 2
+        let y = sf.minY + 20
+        window?.setFrame(NSRect(x: x, y: y, width: kWindowWidth, height: kWindowHeight), display: false)
+        lastScreenFrame = sf
     }
-    
+
+    private func startScreenTracking() {
+        guard screenTrackingTimer == nil else { return }
+        screenTrackingTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let screen = self.activeScreen() else { return }
+                if screen.frame != self.lastScreenFrame {
+                    self.positionWindow()
+                }
+            }
+        }
+    }
+
+    private func stopScreenTracking() {
+        screenTrackingTimer?.invalidate()
+        screenTrackingTimer = nil
+    }
+
+    private func activeScreen() -> NSScreen? {
+        let mouseLocation = NSEvent.mouseLocation
+        return NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) } ?? NSScreen.main
+    }
+
     func show() {
-        DispatchQueue.main.async { [weak self] in
-            self?.positionWindow() // Recenter on current screen
-            self?.window?.orderFrontRegardless()
-            self?.isRecording = true
-        }
+        positionWindow()
+        isRecording = true
     }
-    
+
     func hide() {
-        DispatchQueue.main.async { [weak self] in
-            self?.window?.orderOut(nil)
-            self?.isRecording = false
-            self?.audioLevel = 0.0
-        }
+        isRecording = false
+        audioLevel = 0.0
     }
-    
+
     func updateAudioLevel(_ level: Float) {
-        DispatchQueue.main.async { [weak self] in
-            self?.audioLevel = level
-        }
+        audioLevel = level
+    }
+
+    deinit {
+        screenTrackingTimer?.invalidate()
     }
 }
 
 // MARK: - SwiftUI Overlay View
 
 struct RecordingOverlayView: View {
-    @Binding var audioLevel: Float
-    @Binding var isRecording: Bool
-    
-    @State private var pulseScale: CGFloat = 1.0
-    @State private var pulseOpacity: Double = 0.6
-    @State private var rotation: Double = 0
-    
+    @ObservedObject var overlay: RecordingOverlayWindow
+    @State private var smoothedLevel: CGFloat = 0
+
+    private var pillWidth: CGFloat {
+        overlay.isRecording ? kExpandedWidth : kIdleWidth
+    }
+
+    private var pillHeight: CGFloat {
+        overlay.isRecording ? kExpandedHeight : kIdleHeight
+    }
+
+    private var normalizedLevel: CGFloat {
+        CGFloat(overlay.audioLevel)
+    }
+
     var body: some View {
-        ZStack {
-            // Background blur effect
-            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
-                .clipShape(Circle())
-            
-            // Outer pulsing ring
-            Circle()
-                .stroke(
-                    LinearGradient(
-                        colors: [.red.opacity(0.4), .orange.opacity(0.2)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 3
-                )
-                .scaleEffect(pulseScale)
-                .opacity(pulseOpacity)
-                .animation(
-                    .easeInOut(duration: 1.2)
-                    .repeatForever(autoreverses: true),
-                    value: pulseScale
-                )
-            
-            // Middle pulsing ring
-            Circle()
-                .stroke(Color.red.opacity(0.15), lineWidth: 8)
-                .scaleEffect(pulseScale * 0.85)
-                .opacity(pulseOpacity * 0.7)
-            
-            // Audio level rings - dynamic visualization
-            ForEach(0..<5) { index in
-                Circle()
-                    .stroke(
-                        audioLevelColor(for: index)
-                            .opacity(0.3 + Double(index) * 0.1),
-                        lineWidth: 2 + CGFloat(index) * 0.5
-                    )
-                    .scaleEffect(scaleForRing(index))
-                    .animation(.easeOut(duration: 0.08), value: audioLevel)
-            }
-            
-            // Center main circle with gradient
+        ZStack(alignment: .bottom) {
+            Color.clear
+
             ZStack {
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [.red, .red.opacity(0.8)],
-                            center: .center,
-                            startRadius: 20,
-                            endRadius: 40
-                        )
-                    )
-                    .frame(width: 80, height: 80)
-                    .shadow(color: .red.opacity(0.4), radius: 20, x: 0, y: 0)
-                
-                // Microphone icon
-                Image(systemName: "mic.fill")
-                    .font(.system(size: 36, weight: .semibold))
-                    .foregroundColor(.white)
-                    .symbolEffect(.pulse, isActive: isRecording)
-            }
-            
-            // Recording indicator pill at bottom
-            VStack {
-                Spacer()
-                
-                HStack(spacing: 6) {
-                    // Animated recording dot
-                    ZStack {
-                        Circle()
-                            .fill(Color.red)
-                            .frame(width: 8, height: 8)
-                            
-                        Circle()
-                            .fill(Color.red)
-                            .frame(width: 8, height: 8)
-                            .opacity(pulseOpacity)
-                            .scaleEffect(pulseScale)
-                    }
-                    
-                    Text("Recording...")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white)
+                if overlay.isRecording {
+                    subtleGlow
+                        .transition(.opacity)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(
-                    Capsule()
-                        .fill(.black.opacity(0.6))
-                        .background(
-                            Capsule()
-                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                        )
+
+                pillBackground
+
+                if overlay.isRecording {
+                    gradientBorder
+                        .transition(.opacity.animation(.easeIn(duration: 0.25).delay(0.15)))
+
+                    waveformBars
+                        .transition(.opacity.animation(.easeIn(duration: 0.25).delay(0.15)))
+                }
+            }
+            .frame(width: pillWidth, height: pillHeight)
+            .animation(.spring(response: 0.5, dampingFraction: 0.75), value: overlay.isRecording)
+            .padding(.bottom, kWindowPadding)
+        }
+        .frame(width: kWindowWidth, height: kWindowHeight)
+    }
+
+    // MARK: - Subtle Glow
+
+    private var subtleGlow: some View {
+        Capsule()
+            .fill(Color.white.opacity(0.05 + smoothedLevel * 0.1))
+            .frame(width: pillWidth + 8, height: pillHeight + 8)
+            .blur(radius: 8 + smoothedLevel * 4)
+            .animation(.easeOut(duration: 0.1), value: smoothedLevel)
+    }
+
+    // MARK: - Background
+
+    private var pillBackground: some View {
+        Capsule()
+            .fill(overlay.isRecording
+                  ? Color.black.opacity(0.75)
+                  : Color.white.opacity(0.15))
+    }
+
+    // MARK: - Rotating Gradient Border
+
+    private var gradientBorder: some View {
+        TimelineView(.animation) { timeline in
+            let angle = Angle.degrees(timeline.date.timeIntervalSinceReferenceDate * 90)
+            let lineWidth = 2.0 + smoothedLevel * 0.5
+
+            Capsule()
+                .stroke(
+                    AngularGradient(
+                        gradient: Gradient(colors: [
+                            .white.opacity(0.8),
+                            .cyan.opacity(0.5),
+                            .white.opacity(0.15),
+                            .clear,
+                            .clear,
+                            .cyan.opacity(0.3),
+                            .white.opacity(0.8)
+                        ]),
+                        center: .center,
+                        angle: angle
+                    ),
+                    lineWidth: lineWidth
                 )
-                .padding(.bottom, 20)
-            }
-            
-            // Audio level bars visualization
-            HStack(spacing: 3) {
-                ForEach(0..<7) { index in
+        }
+    }
+
+    // MARK: - Waveform Bars
+
+    private var waveformBars: some View {
+        TimelineView(.animation) { timeline in
+            let target = normalizedLevel
+            let newSmoothed = smoothedLevel + (target - smoothedLevel) * 0.15
+            let envelope: [CGFloat] = [0.4, 0.7, 1.0, 0.7, 0.4]
+
+            HStack(alignment: .center, spacing: 4) {
+                ForEach(0..<5, id: \.self) { index in
                     RoundedRectangle(cornerRadius: 1.5)
-                        .fill(audioLevel > Float(index) / 7 ? Color.green : Color.gray.opacity(0.3))
-                        .frame(width: 4, height: barHeight(for: index))
-                        .animation(.easeOut(duration: 0.05), value: audioLevel)
+                        .fill(Color.white.opacity(0.9))
+                        .frame(width: 3, height: 4 + envelope[index] * newSmoothed * 16)
                 }
             }
-            .offset(y: 45)
-        }
-        .frame(width: 200, height: 200)
-        .onAppear {
-            // Start pulse animation
-            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
-                pulseScale = 1.25
-                pulseOpacity = 0.2
+            .onChange(of: timeline.date) { _ in
+                smoothedLevel = smoothedLevel + (normalizedLevel - smoothedLevel) * 0.15
             }
-        }
-    }
-    
-    private func audioLevelColor(for ringIndex: Int) -> Color {
-        if audioLevel < 0.3 {
-            return .green
-        } else if audioLevel < 0.6 {
-            return .yellow
-        } else {
-            return .red
-        }
-    }
-    
-    private func scaleForRing(_ index: Int) -> CGFloat {
-        let baseScale = 0.5 + (CGFloat(index) * 0.08)
-        let levelScale = CGFloat(audioLevel) * (0.15 + CGFloat(index) * 0.02)
-        return baseScale + levelScale
-    }
-    
-    private func barHeight(for index: Int) -> CGFloat {
-        let heights: [CGFloat] = [8, 14, 20, 24, 20, 14, 8]
-        let baseHeight = heights[index]
-        let levelMultiplier = 0.5 + CGFloat(audioLevel) * 0.5
-        return baseHeight * levelMultiplier
-    }
-}
-
-// MARK: - Visual Effect View
-
-struct VisualEffectView: NSViewRepresentable {
-    let material: NSVisualEffectView.Material
-    let blendingMode: NSVisualEffectView.BlendingMode
-    
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material
-        view.blendingMode = blendingMode
-        view.state = .active
-        view.wantsLayer = true
-        view.layer?.cornerRadius = 100
-        return view
-    }
-    
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.blendingMode = blendingMode
-    }
-}
-
-// MARK: - Preview
-
-struct RecordingOverlayView_Previews: PreviewProvider {
-    static var previews: some View {
-        Group {
-            RecordingOverlayView(
-                audioLevel: .constant(0.3),
-                isRecording: .constant(true)
-            )
-            .frame(width: 200, height: 200)
-            .background(Color.black)
-            .previewDisplayName("Low Level")
-            
-            RecordingOverlayView(
-                audioLevel: .constant(0.7),
-                isRecording: .constant(true)
-            )
-            .frame(width: 200, height: 200)
-            .background(Color.black)
-            .previewDisplayName("High Level")
         }
     }
 }

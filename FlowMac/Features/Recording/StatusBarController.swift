@@ -3,7 +3,8 @@ import AppKit
 import Combine
 
 /// Controller for the status bar menu
-class StatusBarController: ObservableObject {
+@MainActor
+class StatusBarController: NSObject, ObservableObject {
     private var statusBar: NSStatusBar
     private var statusItem: NSStatusItem
     private var popover: NSPopover?
@@ -23,10 +24,12 @@ class StatusBarController: ObservableObject {
         self.audioEngine = audioEngine
         self.recognitionService = recognitionService
         self.textInjector = textInjector
-        
-        statusBar = NSStatusBar()
+
+        statusBar = NSStatusBar.system
         statusItem = statusBar.statusItem(withLength: NSStatusItem.variableLength)
-        
+
+        super.init()
+
         setupStatusBar()
         setupPopover()
         setupObservers()
@@ -76,16 +79,14 @@ class StatusBarController: ObservableObject {
     }
     
     private func updateMenuIcon() {
-        DispatchQueue.main.async { [weak self] in
-            guard let button = self?.statusItem.button else { return }
-            
-            if self?.isRecording == true {
-                button.image = NSImage(systemSymbolName: "waveform.circle.fill", accessibilityDescription: "Recording")
-                button.contentTintColor = .systemRed
-            } else {
-                button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "Flow Mac")
-                button.contentTintColor = nil
-            }
+        guard let button = statusItem.button else { return }
+
+        if isRecording {
+            button.image = NSImage(systemSymbolName: "waveform.circle.fill", accessibilityDescription: "Recording")
+            button.contentTintColor = .systemRed
+        } else {
+            button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "Flow Mac")
+            button.contentTintColor = nil
         }
     }
     
@@ -123,8 +124,16 @@ class StatusBarController: ObservableObject {
         toggleItem.target = self
         menu.addItem(toggleItem)
         
+        let transcribeItem = NSMenuItem(
+            title: "Transcribe Audio File...",
+            action: #selector(transcribeFile),
+            keyEquivalent: ""
+        )
+        transcribeItem.target = self
+        menu.addItem(transcribeItem)
+
         menu.addItem(NSMenuItem.separator())
-        
+
         let settingsItem = NSMenuItem(
             title: "Settings...",
             action: #selector(openSettings),
@@ -149,20 +158,47 @@ class StatusBarController: ObservableObject {
     }
     
     @objc private func toggleRecording() {
+        DebugLog.log("UI. toggleRecording button pressed")
         NotificationCenter.default.post(name: .toggleRecording, object: nil)
     }
+
+    @objc private func transcribeFile() {
+        FileTranscriptionService.shared.transcribeFromFilePicker(using: recognitionService)
+    }
     
+    private var settingsWindow: NSWindow?
+
     @objc private func openSettings() {
         popover?.performClose(nil)
-        
+
+        if let existing = settingsWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let settingsView = SettingsView()
+        let hostingController = NSHostingController(rootView: settingsView)
+
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = "Flow Mac Settings"
+        window.styleMask = [.titled, .closable]
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+
+        self.settingsWindow = window
+
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        
-        // Open settings window
-        if #available(macOS 14.0, *) {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        } else {
-            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            NSApp.setActivationPolicy(.accessory)
+            self?.settingsWindow = nil
         }
     }
     
@@ -175,4 +211,5 @@ class StatusBarController: ObservableObject {
 
 extension Notification.Name {
     static let toggleRecording = Notification.Name("toggleRecording")
+    static let hotkeyDidChange = Notification.Name("hotkeyDidChange")
 }
