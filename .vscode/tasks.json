@@ -1,0 +1,30 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build & Run FlowMac",
+      "type": "shell",
+      "command": "pkill -x FlowMac 2>/dev/null; xcodebuild -project FlowMac.xcodeproj -scheme FlowMac -configuration Debug build && BUILT_DIR=$(xcodebuild -project FlowMac.xcodeproj -scheme FlowMac -configuration Debug -showBuildSettings 2>/dev/null | awk '/^ *BUILT_PRODUCTS_DIR =/{print $3}') && open \"$BUILT_DIR/FlowMac.app\"",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build FlowMac (Release)",
+      "type": "shell",
+      "command": "pkill -x FlowMac 2>/dev/null; xcodebuild -project FlowMac.xcodeproj -scheme FlowMac -configuration Release build",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}

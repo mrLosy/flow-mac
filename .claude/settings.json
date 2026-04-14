@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh api:*)",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(n['path']\\) for n in data.get\\('tree',[]\\)]\")",
+      "WebSearch",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(pkill -9 -f FlowMac)",
+      "Bash(xcodebuild -project FlowMac.xcodeproj -scheme FlowMac -configuration Debug clean build)",
+      "Bash(rm -rf ~/Desktop/FlowMac.app)",
+      "Bash(cp -R /Users/stashkevich/Library/Developer/Xcode/DerivedData/FlowMac-euwdclvllsewiwhkgobwrzceylcb/Build/Products/Debug/FlowMac.app ~/Desktop/FlowMac.app)",
+      "Read(//Users/stashkevich/Desktop/FlowMac.app/Contents/MacOS/**)",
+      "Bash(git checkout:*)",
+      "Bash(security find-generic-password:*)",
+      "Bash(ls ~/Desktop/flowmac*)",
+      "Bash(~/Desktop/FlowMac.app/Contents/MacOS/FlowMac)",
+      "Bash(/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f ~/Desktop/FlowMac.app)",
+      "Bash(open ~/Desktop/FlowMac.app)",
+      "Read(//Users/stashkevich/Library/Containers/com.flowmac.app/Data/Library/Caches/**)",
+      "Read(//Users/stashkevich/Library/Containers/com.flowmac.app/Data/Library/Preferences/**)",
+      "Bash(defaults write:*)",
+      "Bash(rm -f /Users/stashkevich/Library/Containers/com.flowmac.app/Data/Library/Caches/flowmac_debug.log)",
+      "Bash(security delete-generic-password:*)"
+    ],
+    "additionalDirectories": [
+      "/Users/stashkevich/Desktop"
+    ]
+  }
+}
