@@ -25,14 +25,21 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
     private var retryCount = 0
     private let maxRetries = 3
     private let retryDelay: TimeInterval = 2.0
+    /// Hard upper bound on a whole transcription (across all retries) so the UI
+    /// never stays stuck on "Transcribing…" when the network silently stalls.
+    private let overallTimeout: TimeInterval = 40
+    private var watchdog: DispatchWorkItem?
 
     weak var streamingDelegate: StreamingTranscriptionDelegate?
 
     override init() {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 300
-        config.waitsForConnectivity = true
+        config.timeoutIntervalForRequest = 25
+        config.timeoutIntervalForResource = 60
+        // Fail fast when offline instead of silently waiting for connectivity —
+        // retries with backoff already cover brief drops, and the watchdog caps
+        // the overall time.
+        config.waitsForConnectivity = false
         self.urlSession = URLSession(configuration: config)
         super.init()
 
@@ -61,8 +68,47 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
         
         // Reset retry count for new transcription
         retryCount = 0
-        
-        performTranscription(audioData: audioData, completion: completion)
+
+        // Fire the caller's completion exactly once — from the network path or
+        // the watchdog, whichever happens first — so the UI never stays stuck
+        // on "Transcribing…" if the request stalls.
+        let guarded = makeGuardedCompletion(completion)
+        scheduleWatchdog(firing: guarded)
+        performTranscription(audioData: audioData, completion: guarded)
+    }
+
+    private func makeGuardedCompletion(
+        _ completion: @escaping (Result<String, Error>) -> Void
+    ) -> (Result<String, Error>) -> Void {
+        let lock = NSLock()
+        var fired = false
+        return { [weak self] result in
+            lock.lock()
+            let alreadyFired = fired
+            fired = true
+            lock.unlock()
+            guard !alreadyFired else { return }
+            self?.cancelWatchdog()
+            completion(result)
+        }
+    }
+
+    /// If the whole transcription (including retries) hasn't finished within
+    /// `overallTimeout`, surface a clear error instead of spinning forever.
+    private func scheduleWatchdog(firing completion: @escaping (Result<String, Error>) -> Void) {
+        cancelWatchdog()
+        let item = DispatchWorkItem { [weak self] in
+            self?.isProcessing = false
+            self?.errorMessage = RetryReason.connectionFailed.userMessage
+            completion(.failure(RecognitionError.maxRetriesExceeded(.connectionFailed)))
+        }
+        watchdog = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + overallTimeout, execute: item)
+    }
+
+    private func cancelWatchdog() {
+        watchdog?.cancel()
+        watchdog = nil
     }
     
     private func performTranscription(audioData: Data, completion: @escaping (Result<String, Error>) -> Void) {
@@ -129,12 +175,9 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
             
             // Handle HTTP errors
             if !(200...299).contains(httpResponse.statusCode) {
-                let errorMessage = self.parseErrorResponse(data: data) ?? "HTTP \(httpResponse.statusCode)"
-                DebugLog.log("API ERROR: HTTP \(httpResponse.statusCode) — \(errorMessage)")
-                DispatchQueue.main.async {
-                    self.errorMessage = errorMessage
-                }
-                
+                let serverMessage = self.parseErrorResponse(data: data) ?? "HTTP \(httpResponse.statusCode)"
+                DebugLog.log("API ERROR: HTTP \(httpResponse.statusCode) — \(serverMessage)")
+
                 // Retry on server errors (5xx) and rate limiting (429)
                 if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
                     let reason: RetryReason = httpResponse.statusCode == 429 ? .rateLimit : .serverError
@@ -142,7 +185,15 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
                     return
                 }
 
-                completion(.failure(RecognitionError.apiError(errorMessage)))
+                // 403: Groq geo-blocks some regions (e.g. RU) at the Cloudflare
+                // edge, before auth — a VPN or our own backend proxy is required.
+                let displayMessage = httpResponse.statusCode == 403
+                    ? "Service unavailable in your region. Connect via VPN or use the built-in service."
+                    : serverMessage
+                DispatchQueue.main.async {
+                    self.errorMessage = displayMessage
+                }
+                completion(.failure(RecognitionError.apiError(displayMessage)))
                 return
             }
             
