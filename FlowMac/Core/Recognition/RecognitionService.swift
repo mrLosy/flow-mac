@@ -108,10 +108,12 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
                 
                 // Retry on network errors
                 if self.shouldRetry(error: error) {
-                    self.retryTranscription(audioData: audioData, completion: completion)
+                    let reason: RetryReason = (error as NSError).code == NSURLErrorNotConnectedToInternet
+                        ? .noInternet : .connectionFailed
+                    self.retryTranscription(audioData: audioData, reason: reason, completion: completion)
                     return
                 }
-                
+
                 completion(.failure(error))
                 return
             }
@@ -135,12 +137,11 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
                 
                 // Retry on server errors (5xx) and rate limiting (429)
                 if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                    if self.retryCount < self.maxRetries {
-                        self.retryTranscription(audioData: audioData, completion: completion)
-                        return
-                    }
+                    let reason: RetryReason = httpResponse.statusCode == 429 ? .rateLimit : .serverError
+                    self.retryTranscription(audioData: audioData, reason: reason, completion: completion)
+                    return
                 }
-                
+
                 completion(.failure(RecognitionError.apiError(errorMessage)))
                 return
             }
@@ -183,21 +184,21 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
         task.resume()
     }
     
-    private func retryTranscription(audioData: Data, completion: @escaping (Result<String, Error>) -> Void) {
+    private func retryTranscription(audioData: Data, reason: RetryReason, completion: @escaping (Result<String, Error>) -> Void) {
         guard retryCount < maxRetries else {
             DispatchQueue.main.async {
-                self.errorMessage = "Failed after \(self.maxRetries) attempts"
+                self.errorMessage = reason.userMessage
             }
-            completion(.failure(RecognitionError.maxRetriesExceeded))
+            completion(.failure(RecognitionError.maxRetriesExceeded(reason)))
             return
         }
-        
+
         retryCount += 1
-        
+
         DispatchQueue.main.async {
             self.errorMessage = "Retrying... (\(self.retryCount)/\(self.maxRetries))"
         }
-        
+
         // Exponential backoff
         let delay = retryDelay * pow(2.0, Double(retryCount - 1))
         DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -319,6 +320,28 @@ struct ErrorDetail: Codable {
 
 // MARK: - Errors
 
+/// Why a transcription request was retried — drives the user-facing message
+/// shown once all retry attempts are exhausted.
+enum RetryReason {
+    case noInternet
+    case connectionFailed
+    case rateLimit
+    case serverError
+
+    var userMessage: String {
+        switch self {
+        case .noInternet:
+            return "No internet connection. Check your network and try again."
+        case .connectionFailed:
+            return "Couldn't reach the server. Check your connection and try again."
+        case .rateLimit:
+            return "Rate limit reached. Try again in a moment."
+        case .serverError:
+            return "Service temporarily unavailable. Try again later."
+        }
+    }
+}
+
 enum RecognitionError: Error, LocalizedError {
     case noAPIKey
     case emptyAudio
@@ -327,7 +350,7 @@ enum RecognitionError: Error, LocalizedError {
     case invalidResponse
     case parsingError
     case apiError(String)
-    case maxRetriesExceeded
+    case maxRetriesExceeded(RetryReason)
     case networkError(String)
     
     var errorDescription: String? {
@@ -346,8 +369,8 @@ enum RecognitionError: Error, LocalizedError {
             return "Failed to parse server response."
         case .apiError(let message):
             return "API Error: \(message)"
-        case .maxRetriesExceeded:
-            return "Failed after maximum retry attempts. Please check your connection."
+        case .maxRetriesExceeded(let reason):
+            return reason.userMessage
         case .networkError(let message):
             return "Network Error: \(message)"
         }

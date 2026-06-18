@@ -286,6 +286,9 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
             }
             Task { @MainActor in
                 self.isRecording = true
+                // Clear any stale error from a previous failed attempt so it
+                // doesn't linger in the menu while a new recording is underway.
+                self.recognitionService.errorMessage = nil
                 if showOverlay { self.recordingOverlay.show() }
                 self.recordingStartTime = Date()
                 MicVolumeManager.shared.boostIfEnabled()
