@@ -1,0 +1,122 @@
+{
+  "metadata": {
+    "timestamp": "2026-04-16T19:32:05.983054+00:00",
+    "mode": "quick",
+    "target_count": 10,
+    "actual_clips": 10,
+    "total_audio_seconds": 88.8,
+    "audio_source": "tts_augmented",
+    "pricing_verified_date": "2026-04-16",
+    "total_duration_seconds": 40.5
+  },
+  "test1_transcription": {
+    "total_requests": 10,
+    "successful": 10,
+    "errors": 0,
+    "error_rate_pct": 0.0,
+    "total_audio_minutes": 1.48,
+    "calculated_cost_usd": 0.000987,
+    "cost_per_minute_usd": 0.0006666666666666666,
+    "latency_ms": {
+      "p50": 429.0,
+      "p95": 816.0,
+      "p99": 816.0,
+      "avg": 436.0,
+      "min": 232.0,
+      "max": 816.0
+    },
+    "by_duration_bucket": {
+      "short_5_15s": {
+        "count": 9,
+        "avg_latency_ms": 393.0,
+        "avg_audio_sec": 6.0
+      },
+      "long_30_60s": {
+        "count": 1,
+        "avg_latency_ms": 816.0,
+        "avg_audio_sec": 34.4
+      }
+    }
+  },
+  "test2_llm": {
+    "llama-3.1-8b-instant": {
+      "label": "Llama 3.1 8B (actual code)",
+      "total_requests": 10,
+      "successful": 8,
+      "avg_input_tokens": 107.1,
+      "avg_output_tokens": 69.4,
+      "cost_per_request_usd": 1.091e-05,
+      "cost_per_audio_minute_usd": 1.091e-05,
+      "latency_ms": {
+        "p50": 165.0,
+        "p95": 764.0,
+        "avg": 230.0
+      }
+    },
+    "llama-3.3-70b-versatile": {
+      "label": "Llama 3.3 70B (documented)",
+      "total_requests": 10,
+      "successful": 10,
+      "avg_input_tokens": 109.7,
+      "avg_output_tokens": 47.2,
+      "cost_per_request_usd": 0.00010201,
+      "cost_per_audio_minute_usd": 0.00010201,
+      "latency_ms": {
+        "p50": 414.0,
+        "p95": 723.0,
+        "avg": 395.0
+      }
+    },
+    "model_comparison": {
+      "cost_ratio_70b_vs_8b": 9.4,
+      "note": "70B is 9x more expensive than 8B"
+    }
+  },
+  "test3_pipeline": {
+    "total": 10,
+    "successful": 9,
+    "e2e_latency_ms": {
+      "p50": 421.0,
+      "p95": 1066.0,
+      "avg": 580.0
+    },
+    "safe_merge_rejected_count": 4,
+    "safe_merge_rejected_pct": 44.4,
+    "avg_edit_distance": 0.41
+  },
+  "test4_ratelimits": {
+    "skipped": true
+  },
+  "test5_economics": {
+    "whisper_cost_per_min_usd": 0.0006666666666666666,
+    "llm_8b_cost_per_min_usd": 1.091e-05,
+    "llm_70b_cost_per_min_usd": 0.00010201,
+    "actual_cost_per_min_usd": 0.00067758,
+    "documented_cost_per_min_usd": 0.00173,
+    "difference_pct": -60.8,
+    "model_mismatch": "Code uses llama-3.1-8b, doc assumes llama-3.3-70b",
+    "tiers": {
+      "free": {
+        "quota_min": 15,
+        "monthly_cost_usd": 0.0102,
+        "price_usd": 0.0,
+        "revenue_after_apple_usd": 0.0,
+        "margin_pct": -100
+      },
+      "basic": {
+        "quota_min": 120,
+        "monthly_cost_usd": 0.0813,
+        "price_usd": 5.99,
+        "revenue_after_apple_usd": 4.19,
+        "margin_pct": 98.1
+      },
+      "pro": {
+        "quota_min": 500,
+        "monthly_cost_usd": 0.3388,
+        "price_usd": 11.99,
+        "revenue_after_apple_usd": 8.39,
+        "margin_pct": 96.0
+      }
+    }
+  }
+}

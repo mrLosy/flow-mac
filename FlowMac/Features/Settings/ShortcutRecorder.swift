@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import CoreAudio
+import Carbon
 
 // MARK: - Audio Device Model
 
@@ -16,17 +17,24 @@ struct ShortcutRecorderView: NSViewRepresentable {
     let mode: RecordingMode
     @Binding var keyCode: UInt16
     @Binding var modifiers: NSEvent.ModifierFlags
+    @Binding var modifierSides: UInt32
 
     func makeNSView(context: Context) -> ShortcutRecorder {
         let recorder = ShortcutRecorder()
-        recorder.setShortcut(keyCode: keyCode, modifiers: modifiers)
-        recorder.onShortcutChanged = { code, mods in
+        recorder.setShortcut(keyCode: keyCode, modifiers: modifiers, modifierSides: modifierSides)
+        recorder.onShortcutChanged = { code, mods, sides in
             keyCode = code
             modifiers = mods
+            modifierSides = sides
             NotificationCenter.default.post(
                 name: .hotkeyDidChange,
                 object: nil,
-                userInfo: ["keyCode": code, "modifiers": mods.rawValue, "mode": mode.rawValue]
+                userInfo: [
+                    "keyCode": code,
+                    "modifiers": mods.rawValue,
+                    "modifierSides": sides,
+                    "mode": mode.rawValue,
+                ]
             )
         }
         return recorder
@@ -34,7 +42,7 @@ struct ShortcutRecorderView: NSViewRepresentable {
 
     func updateNSView(_ nsView: ShortcutRecorder, context: Context) {
         if !nsView.isRecordingActive {
-            nsView.setShortcut(keyCode: keyCode, modifiers: modifiers)
+            nsView.setShortcut(keyCode: keyCode, modifiers: modifiers, modifierSides: modifierSides)
         }
     }
 }
@@ -42,17 +50,19 @@ struct ShortcutRecorderView: NSViewRepresentable {
 // MARK: - Shortcut Recorder NSView
 
 class ShortcutRecorder: NSView {
-    var onShortcutChanged: ((UInt16, NSEvent.ModifierFlags) -> Void)?
+    var onShortcutChanged: ((UInt16, NSEvent.ModifierFlags, UInt32) -> Void)?
     var isRecordingActive: Bool { isRecording }
 
     private var currentKeyCode: UInt16 = 49
     private var currentModifiers: NSEvent.ModifierFlags = [.command, .shift]
+    private var currentModifierSides: UInt32 = 0
     private var currentKeyDisplay: String = "Space"
     private var isRecording = false
 
-    func setShortcut(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
+    func setShortcut(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, modifierSides: UInt32) {
         currentKeyCode = keyCode
         currentModifiers = modifiers
+        currentModifierSides = modifierSides
         if keyCode == 0 {
             currentKeyDisplay = ""
         } else {
@@ -60,12 +70,22 @@ class ShortcutRecorder: NSView {
         }
         setNeedsDisplay(bounds)
     }
+
+    // Recording session state
     private var liveModifiers: NSEvent.ModifierFlags = []
+    private var maxModifiersSeen: NSEvent.ModifierFlags = []
+    private var sidesSeen: UInt32 = 0
     private var keyPressedWhileRecording = false
+    private var holdTimer: Timer?
     private var keyMonitor: Any?
     private var globalKeyMonitor: Any?
     private var flagsMonitor: Any?
     private var globalFlagsMonitor: Any?
+
+    /// How long a modifier combo must be held (unchanged) before it's committed
+    /// as a modifier-only shortcut. Long enough that a user who intends a combo
+    /// (Cmd+Shift+V) has time to press the non-modifier key.
+    private static let modifierOnlyHoldDelay: TimeInterval = 1.2
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -107,7 +127,7 @@ class ShortcutRecorder: NSView {
 
     override func mouseDown(with event: NSEvent) {
         if isRecording {
-            stopRecording()
+            cancelRecording()
         } else {
             startRecording()
         }
@@ -116,29 +136,21 @@ class ShortcutRecorder: NSView {
     private func startRecording() {
         isRecording = true
         liveModifiers = []
+        maxModifiersSeen = []
+        sidesSeen = 0
         keyPressedWhileRecording = false
+        holdTimer?.invalidate()
+        holdTimer = nil
         setNeedsDisplay(bounds)
 
         let handleKey: (NSEvent) -> Void = { [weak self] event in
             guard let self, self.isRecording else { return }
-            self.keyPressedWhileRecording = true
-            _ = self.handleKeyEvent(event)
+            self.handleKeyEvent(event)
         }
 
         let handleFlags: (NSEvent) -> Void = { [weak self] event in
             guard let self, self.isRecording else { return }
-            let prev = self.liveModifiers
-            let curr = event.modifierFlags.intersection([.command, .option, .control, .shift])
-            self.liveModifiers = curr
-            self.setNeedsDisplay(self.bounds)
-
-            if !prev.isEmpty && curr.isEmpty && !self.keyPressedWhileRecording {
-                self.currentKeyCode = 0
-                self.currentModifiers = prev
-                self.currentKeyDisplay = Self.modifierOnlyDisplayName(prev)
-                self.onShortcutChanged?(0, prev)
-                self.stopRecording()
-            }
+            self.handleFlagsEvent(event)
         }
 
         // Local monitors: when Settings window is focused
@@ -148,7 +160,7 @@ class ShortcutRecorder: NSView {
         }
         flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { event in
             handleFlags(event)
-            return event
+            return nil
         }
 
         // Global monitors: when another window is focused (Cmd+key bypasses local)
@@ -156,31 +168,92 @@ class ShortcutRecorder: NSView {
         globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged], handler: handleFlags)
     }
 
-    private func handleKeyEvent(_ event: NSEvent) -> Bool {
-        let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+    private func handleFlagsEvent(_ event: NSEvent) {
+        let curr = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        liveModifiers = curr
 
-        // Esc cancels
-        if event.keyCode == 53 && mods.isEmpty {
-            stopRecording()
-            return true
+        if !curr.isEmpty {
+            maxModifiersSeen.formUnion(curr)
+            sidesSeen = Self.accumulateSides(
+                fromRawFlags: UInt64(event.modifierFlags.rawValue),
+                mods: curr,
+                into: sidesSeen
+            )
         }
 
-        // Ignore modifier-only keys (keyCodes 54-63)
+        setNeedsDisplay(bounds)
+
+        // Reset hold timer: only commit modifier-only after the combo stays unchanged
+        // for `modifierOnlyHoldDelay` seconds. If the user then presses a regular key,
+        // the keyDown path wins and cancels the timer.
+        holdTimer?.invalidate()
+        holdTimer = nil
+
+        guard !curr.isEmpty, !keyPressedWhileRecording else { return }
+
+        let snapshot = curr
+        let snapshotSides = sidesSeen
+        holdTimer = Timer.scheduledTimer(withTimeInterval: Self.modifierOnlyHoldDelay, repeats: false) { [weak self] _ in
+            guard let self, self.isRecording,
+                  !self.keyPressedWhileRecording,
+                  self.liveModifiers == snapshot else { return }
+            self.commit(keyCode: 0, modifiers: snapshot, sides: snapshotSides)
+        }
+    }
+
+    private func handleKeyEvent(_ event: NSEvent) {
+        // Physical modifier keycodes (54-63) shouldn't arrive via .keyDown on macOS,
+        // but guard anyway — they'd confuse the combo commit.
         if event.keyCode >= 54 && event.keyCode <= 63 {
-            return true
+            return
         }
 
-        currentKeyCode = event.keyCode
-        currentModifiers = mods
-        currentKeyDisplay = Self.displayName(for: event.keyCode, event: event)
-        onShortcutChanged?(currentKeyCode, currentModifiers)
+        // Esc with no modifiers cancels recording
+        if event.keyCode == 53 && maxModifiersSeen.isEmpty && liveModifiers.isEmpty {
+            cancelRecording()
+            return
+        }
+
+        keyPressedWhileRecording = true
+        holdTimer?.invalidate()
+        holdTimer = nil
+
+        let eventMods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        let finalMods = maxModifiersSeen.union(eventMods)
+        let finalSides = Self.accumulateSides(
+            fromRawFlags: UInt64(event.modifierFlags.rawValue),
+            mods: eventMods,
+            into: sidesSeen
+        )
+
+        let displayCode = event.keyCode
+        currentKeyDisplay = Self.displayName(for: displayCode, event: event)
+        commit(keyCode: displayCode, modifiers: finalMods, sides: finalSides)
+    }
+
+    private func commit(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, sides: UInt32) {
+        currentKeyCode = keyCode
+        currentModifiers = modifiers
+        currentModifierSides = sides
+        if keyCode == 0 {
+            currentKeyDisplay = Self.modifierOnlyDisplayName(modifiers, sides: sides)
+        }
+        onShortcutChanged?(keyCode, modifiers, sides)
         stopRecording()
-        return true
+    }
+
+    private func cancelRecording() {
+        stopRecording()
     }
 
     private func stopRecording() {
         isRecording = false
         liveModifiers = []
+        maxModifiersSeen = []
+        sidesSeen = 0
+        keyPressedWhileRecording = false
+        holdTimer?.invalidate()
+        holdTimer = nil
         removeAllMonitors()
         setNeedsDisplay(bounds)
     }
@@ -196,44 +269,96 @@ class ShortcutRecorder: NSView {
     }
 
     deinit {
+        holdTimer?.invalidate()
         removeAllMonitors()
+    }
+
+    // MARK: - Side Extraction
+
+    /// Updates `existing` with side info for each modifier currently present in `mods`.
+    /// Once a side has been recorded for a modifier (left/right), it is NOT overwritten —
+    /// the first physical side seen in the session wins. This prevents accidental
+    /// flipping when a subsequent event happens to have different side bits set.
+    static func accumulateSides(fromRawFlags rawFlags: UInt64, mods: NSEvent.ModifierFlags, into existing: UInt32) -> UInt32 {
+        var result = existing
+
+        func updateSlot(modPresent: Bool, slot: UInt32, leftMask: UInt64, rightMask: UInt64) {
+            guard modPresent else { return }
+            let currentSide = ModifierSide(rawValue: (result >> slot) & ModifierSideSlot.mask) ?? .any
+            guard currentSide == .any else { return } // already recorded — keep it
+
+            let hasLeft = (rawFlags & leftMask) != 0
+            let hasRight = (rawFlags & rightMask) != 0
+            let side: ModifierSide
+            if hasLeft && !hasRight { side = .left }
+            else if hasRight && !hasLeft { side = .right }
+            else { side = .any } // both or neither → no info; leave as any
+            if side != .any {
+                result = HotkeyConfig.encodeSide(side, at: slot, into: result)
+            }
+        }
+
+        updateSlot(modPresent: mods.contains(.command), slot: ModifierSideSlot.cmd,
+                   leftMask: DeviceModifierMask.leftCommand, rightMask: DeviceModifierMask.rightCommand)
+        updateSlot(modPresent: mods.contains(.shift), slot: ModifierSideSlot.shift,
+                   leftMask: DeviceModifierMask.leftShift, rightMask: DeviceModifierMask.rightShift)
+        updateSlot(modPresent: mods.contains(.option), slot: ModifierSideSlot.option,
+                   leftMask: DeviceModifierMask.leftOption, rightMask: DeviceModifierMask.rightOption)
+        updateSlot(modPresent: mods.contains(.control), slot: ModifierSideSlot.control,
+                   leftMask: DeviceModifierMask.leftControl, rightMask: DeviceModifierMask.rightControl)
+
+        return result
     }
 
     // MARK: - Display
 
     private func shortcutString() -> String {
         if isRecording {
-            if liveModifiers.isEmpty {
+            if liveModifiers.isEmpty && maxModifiersSeen.isEmpty {
                 return "Press shortcut..."
             }
-            var parts: [String] = []
-            if liveModifiers.contains(.command) { parts.append("⌘") }
-            if liveModifiers.contains(.option) { parts.append("⌥") }
-            if liveModifiers.contains(.control) { parts.append("⌃") }
-            if liveModifiers.contains(.shift) { parts.append("⇧") }
-            parts.append("+ key")
-            return parts.joined(separator: "")
+            let snapshot = maxModifiersSeen.union(liveModifiers)
+            var text = Self.modifierOnlyDisplayName(snapshot, sides: sidesSeen)
+            if text.isEmpty { text = "Press shortcut..." }
+            else { text += " + key" }
+            return text
         }
 
-        var parts: [String] = []
-        if currentModifiers.contains(.command) { parts.append("⌘") }
-        if currentModifiers.contains(.option) { parts.append("⌥") }
-        if currentModifiers.contains(.control) { parts.append("⌃") }
-        if currentModifiers.contains(.shift) { parts.append("⇧") }
+        let modsPart = Self.modifierOnlyDisplayName(currentModifiers, sides: currentModifierSides)
         // keyCode == 0 means modifier-only shortcut
-        if currentKeyCode != 0 {
-            parts.append(currentKeyDisplay)
+        if currentKeyCode == 0 {
+            return modsPart
         }
-        return parts.joined(separator: "")
+        if modsPart.isEmpty {
+            return currentKeyDisplay
+        }
+        return modsPart + currentKeyDisplay
     }
 
-    static func modifierOnlyDisplayName(_ mods: NSEvent.ModifierFlags) -> String {
+    static func modifierOnlyDisplayName(_ mods: NSEvent.ModifierFlags, sides: UInt32 = 0) -> String {
         var parts: [String] = []
-        if mods.contains(.command) { parts.append("⌘") }
-        if mods.contains(.option) { parts.append("⌥") }
-        if mods.contains(.control) { parts.append("⌃") }
-        if mods.contains(.shift) { parts.append("⇧") }
+        if mods.contains(.command) {
+            parts.append("⌘" + sideSuffix(for: ModifierSideSlot.cmd, sides: sides))
+        }
+        if mods.contains(.option) {
+            parts.append("⌥" + sideSuffix(for: ModifierSideSlot.option, sides: sides))
+        }
+        if mods.contains(.control) {
+            parts.append("⌃" + sideSuffix(for: ModifierSideSlot.control, sides: sides))
+        }
+        if mods.contains(.shift) {
+            parts.append("⇧" + sideSuffix(for: ModifierSideSlot.shift, sides: sides))
+        }
         return parts.joined()
+    }
+
+    private static func sideSuffix(for slot: UInt32, sides: UInt32) -> String {
+        let side = ModifierSide(rawValue: (sides >> slot) & ModifierSideSlot.mask) ?? .any
+        switch side {
+        case .left: return "L"
+        case .right: return "R"
+        case .any: return ""
+        }
     }
 
     static func displayName(for keyCode: UInt16, event: NSEvent? = nil) -> String {

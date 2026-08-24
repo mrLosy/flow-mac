@@ -7,6 +7,9 @@ struct StatusBarMenuView: View {
     @ObservedObject var audioEngine: AudioEngine
     @ObservedObject var recognitionService: RecognitionService
     @ObservedObject var textInjector: TextInjector
+    @ObservedObject var historyService: TranscriptionHistoryService
+    @ObservedObject var quotaService = QuotaService.shared
+    @State private var showPaywall = false
 
     var openSettings: () -> Void
     var quitApp: () -> Void
@@ -23,9 +26,13 @@ struct StatusBarMenuView: View {
 
             // Main content
             VStack(spacing: 12) {
+                if shouldShowQuotaBanner {
+                    quotaBanner.padding(.top, 12)
+                }
+
                 // Recording button
                 recordingButton
-                    .padding(.top, 12)
+                    .padding(.top, shouldShowQuotaBanner ? 0 : 12)
 
                 // Status
                 if audioEngine.isRecording {
@@ -43,7 +50,7 @@ struct StatusBarMenuView: View {
             .padding(.horizontal, 16)
 
             // History
-            if !recognitionService.transcriptionHistory.isEmpty {
+            if !historyService.entries.isEmpty {
                 Divider().padding(.horizontal, 12).padding(.top, 12)
                 historyView
                     .padding(.horizontal, 16)
@@ -58,6 +65,7 @@ struct StatusBarMenuView: View {
                 .padding(.vertical, 10)
         }
         .frame(width: 300)
+        .sheet(isPresented: $showPaywall) { PaywallView() }
     }
 
     // MARK: - Header
@@ -90,17 +98,7 @@ struct StatusBarMenuView: View {
 
             Spacer()
 
-            // Hotkey badge
-            HStack(spacing: 2) {
-                Text("⌘⇧")
-                    .font(.system(size: 10, weight: .medium))
-                Text("Space")
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(Color.secondary.opacity(0.15))
-            .cornerRadius(4)
+            quotaIndicator
         }
     }
 
@@ -207,15 +205,37 @@ struct StatusBarMenuView: View {
     // MARK: - History
 
     private var historyView: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Recent")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.secondary)
+        let plan = quotaService.state.plan
+        let limit = min(5, plan.historyLimit)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Recent")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                if !plan.hasFullHistory {
+                    Button {
+                        showPaywall = true
+                    } label: {
+                        Text("See all in Pro")
+                            .font(.system(size: 10))
+                            .foregroundColor(.blue)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
 
             ScrollView {
                 LazyVStack(spacing: 4) {
-                    ForEach(recognitionService.transcriptionHistory.prefix(5)) { entry in
-                        historyRow(entry)
+                    ForEach(historyService.recentEntries(limit: limit)) { entry in
+                        if entry.status == .failed {
+                            failedHistoryRow(entry)
+                        } else {
+                            historyRow(entry)
+                        }
                     }
                 }
             }
@@ -223,7 +243,7 @@ struct StatusBarMenuView: View {
         }
     }
 
-    private func historyRow(_ entry: TranscriptionEntry) -> some View {
+    private func historyRow(_ entry: PersistentTranscriptionEntry) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "text.quote")
                 .font(.system(size: 10))
@@ -260,41 +280,186 @@ struct StatusBarMenuView: View {
         .cornerRadius(6)
     }
 
+    private func failedHistoryRow(_ entry: PersistentTranscriptionEntry) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundColor(.orange)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Ошибка транскрипции")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.orange)
+
+                if let errorMsg = entry.errorMessage {
+                    Text(errorMsg)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+
+                Text(entry.timestamp, style: .relative)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary.opacity(0.7))
+            }
+
+            Spacer()
+
+            Button {
+                NotificationCenter.default.post(
+                    name: .retryTranscription,
+                    object: nil,
+                    userInfo: ["entryID": entry.id]
+                )
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.blue)
+            }
+            .buttonStyle(.plain)
+            .disabled(recognitionService.isProcessing)
+            .help("Повторить")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.08))
+        .cornerRadius(6)
+    }
+
+    // MARK: - Quota Indicator
+
+    private var shouldShowQuotaBanner: Bool {
+        let state = quotaService.state
+        return state.plan.usesBackend && (state.isExhausted || state.usageRatio >= 0.8)
+    }
+
+    private var quotaBanner: some View {
+        let state = quotaService.state
+        let exhausted = state.isExhausted
+        let title = exhausted ? "Quota exhausted" : "Quota nearly used"
+        let subtitle = exhausted
+            ? "Resets \(formattedReset). Upgrade for more minutes."
+            : "\(state.remainingMinutes) min left of \(state.totalMinutes). Resets \(formattedReset)."
+
+        return Button {
+            showPaywall = true
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: exhausted ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(exhausted ? .red : .orange)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(exhausted ? .red : .primary)
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill((exhausted ? Color.red : Color.orange).opacity(0.1))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var formattedReset: String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: quotaService.state.periodEnd)
+    }
+
+    private var quotaIndicator: some View {
+        let state = quotaService.state
+        guard state.plan.usesBackend else { return AnyView(EmptyView()) }
+
+        return AnyView(
+            Button {
+                showPaywall = true
+            } label: {
+                HStack(spacing: 6) {
+                    // Mini progress ring
+                    ZStack {
+                        Circle()
+                            .stroke(Color.secondary.opacity(0.15), lineWidth: 2)
+                        Circle()
+                            .trim(from: 0, to: CGFloat(1.0 - state.usageRatio))
+                            .stroke(quotaColor(state), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                    }
+                    .frame(width: 14, height: 14)
+
+                    Text("\(state.remainingMinutes) min")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(state.isExhausted ? .red : .secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(state.isExhausted ? Color.red.opacity(0.08) : Color.secondary.opacity(0.06))
+                )
+            }
+            .buttonStyle(.plain)
+        )
+    }
+
+    private func quotaColor(_ state: QuotaState) -> Color {
+        if state.isExhausted { return .red }
+        if state.usageRatio >= 0.9 { return .orange }
+        if state.usageRatio >= 0.8 { return .yellow }
+        return .blue
+    }
+
     // MARK: - Footer
 
     private var footerView: some View {
-        HStack {
-            Button {
-                openSettings()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "gear")
-                        .font(.system(size: 11))
-                    Text("Settings")
-                        .font(.system(size: 12))
-                }
-                .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
-
-            Spacer()
-
-            // Permission dots
-            HStack(spacing: 6) {
-                permissionDot("Mic", isGranted: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)
-                permissionDot("A11y", isGranted: textInjector.checkAccessibilityPermissions())
-            }
-
-            Spacer()
-
-            Button {
-                quitApp()
-            } label: {
-                Text("Quit")
-                    .font(.system(size: 12))
+        VStack(spacing: 8) {
+            HStack {
+                Button {
+                    openSettings()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "gear")
+                            .font(.system(size: 11))
+                        Text("Settings")
+                            .font(.system(size: 12))
+                    }
                     .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                // Permission dots
+                HStack(spacing: 6) {
+                    permissionDot("Mic", isGranted: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)
+                    permissionDot("A11y", isGranted: textInjector.checkAccessibilityPermissions())
+                }
+
+                Spacer()
+
+                Button {
+                    quitApp()
+                } label: {
+                    Text("Quit")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
     }
 
