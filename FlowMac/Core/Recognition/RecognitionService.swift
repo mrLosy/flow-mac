@@ -25,14 +25,21 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
     private var retryCount = 0
     private let maxRetries = 3
     private let retryDelay: TimeInterval = 2.0
+    /// Hard upper bound on a whole transcription (across all retries) so the UI
+    /// never stays stuck on "Transcribing…" when the network silently stalls.
+    private let overallTimeout: TimeInterval = 40
+    private var watchdog: DispatchWorkItem?
 
     weak var streamingDelegate: StreamingTranscriptionDelegate?
 
     override init() {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 300
-        config.waitsForConnectivity = true
+        config.timeoutIntervalForRequest = 25
+        config.timeoutIntervalForResource = 60
+        // Fail fast when offline instead of silently waiting for connectivity —
+        // retries with backoff already cover brief drops, and the watchdog caps
+        // the overall time.
+        config.waitsForConnectivity = false
         self.urlSession = URLSession(configuration: config)
         super.init()
 
@@ -61,8 +68,47 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
         
         // Reset retry count for new transcription
         retryCount = 0
-        
-        performTranscription(audioData: audioData, completion: completion)
+
+        // Fire the caller's completion exactly once — from the network path or
+        // the watchdog, whichever happens first — so the UI never stays stuck
+        // on "Transcribing…" if the request stalls.
+        let guarded = makeGuardedCompletion(completion)
+        scheduleWatchdog(firing: guarded)
+        performTranscription(audioData: audioData, completion: guarded)
+    }
+
+    private func makeGuardedCompletion(
+        _ completion: @escaping (Result<String, Error>) -> Void
+    ) -> (Result<String, Error>) -> Void {
+        let lock = NSLock()
+        var fired = false
+        return { [weak self] result in
+            lock.lock()
+            let alreadyFired = fired
+            fired = true
+            lock.unlock()
+            guard !alreadyFired else { return }
+            self?.cancelWatchdog()
+            completion(result)
+        }
+    }
+
+    /// If the whole transcription (including retries) hasn't finished within
+    /// `overallTimeout`, surface a clear error instead of spinning forever.
+    private func scheduleWatchdog(firing completion: @escaping (Result<String, Error>) -> Void) {
+        cancelWatchdog()
+        let item = DispatchWorkItem { [weak self] in
+            self?.isProcessing = false
+            self?.errorMessage = RetryReason.connectionFailed.userMessage
+            completion(.failure(RecognitionError.maxRetriesExceeded(.connectionFailed)))
+        }
+        watchdog = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + overallTimeout, execute: item)
+    }
+
+    private func cancelWatchdog() {
+        watchdog?.cancel()
+        watchdog = nil
     }
     
     private func performTranscription(audioData: Data, completion: @escaping (Result<String, Error>) -> Void) {
@@ -108,10 +154,12 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
                 
                 // Retry on network errors
                 if self.shouldRetry(error: error) {
-                    self.retryTranscription(audioData: audioData, completion: completion)
+                    let reason: RetryReason = (error as NSError).code == NSURLErrorNotConnectedToInternet
+                        ? .noInternet : .connectionFailed
+                    self.retryTranscription(audioData: audioData, reason: reason, completion: completion)
                     return
                 }
-                
+
                 completion(.failure(error))
                 return
             }
@@ -127,21 +175,25 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
             
             // Handle HTTP errors
             if !(200...299).contains(httpResponse.statusCode) {
-                let errorMessage = self.parseErrorResponse(data: data) ?? "HTTP \(httpResponse.statusCode)"
-                DebugLog.log("API ERROR: HTTP \(httpResponse.statusCode) — \(errorMessage)")
-                DispatchQueue.main.async {
-                    self.errorMessage = errorMessage
-                }
-                
+                let serverMessage = self.parseErrorResponse(data: data) ?? "HTTP \(httpResponse.statusCode)"
+                DebugLog.log("API ERROR: HTTP \(httpResponse.statusCode) — \(serverMessage)")
+
                 // Retry on server errors (5xx) and rate limiting (429)
                 if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                    if self.retryCount < self.maxRetries {
-                        self.retryTranscription(audioData: audioData, completion: completion)
-                        return
-                    }
+                    let reason: RetryReason = httpResponse.statusCode == 429 ? .rateLimit : .serverError
+                    self.retryTranscription(audioData: audioData, reason: reason, completion: completion)
+                    return
                 }
-                
-                completion(.failure(RecognitionError.apiError(errorMessage)))
+
+                // 403: Groq geo-blocks some regions (e.g. RU) at the Cloudflare
+                // edge, before auth — a VPN or our own backend proxy is required.
+                let displayMessage = httpResponse.statusCode == 403
+                    ? "Service unavailable in your region. Connect via VPN or use the built-in service."
+                    : serverMessage
+                DispatchQueue.main.async {
+                    self.errorMessage = displayMessage
+                }
+                completion(.failure(RecognitionError.apiError(displayMessage)))
                 return
             }
             
@@ -183,21 +235,21 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
         task.resume()
     }
     
-    private func retryTranscription(audioData: Data, completion: @escaping (Result<String, Error>) -> Void) {
+    private func retryTranscription(audioData: Data, reason: RetryReason, completion: @escaping (Result<String, Error>) -> Void) {
         guard retryCount < maxRetries else {
             DispatchQueue.main.async {
-                self.errorMessage = "Failed after \(self.maxRetries) attempts"
+                self.errorMessage = reason.userMessage
             }
-            completion(.failure(RecognitionError.maxRetriesExceeded))
+            completion(.failure(RecognitionError.maxRetriesExceeded(reason)))
             return
         }
-        
+
         retryCount += 1
-        
+
         DispatchQueue.main.async {
             self.errorMessage = "Retrying... (\(self.retryCount)/\(self.maxRetries))"
         }
-        
+
         // Exponential backoff
         let delay = retryDelay * pow(2.0, Double(retryCount - 1))
         DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -230,7 +282,7 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
         body.append("\(provider.modelName)\r\n".data(using: .utf8)!)
         
         // Add language parameter
-        let language = UserDefaults.standard.string(forKey: "recognitionLanguage") ?? "auto"
+        let language = RecognitionService.currentLanguage
         if language != "auto" {
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
             body.append("Content-Disposition: form-data; name=\"language\"\r\n\r\n".data(using: .utf8)!)
@@ -290,6 +342,33 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
     }
 }
 
+// MARK: - Language
+
+extension RecognitionService {
+    /// Whisper languages offered in Settings: (ISO-639-1 code, display name).
+    static let supportedLanguages: [(String, String)] = [
+        ("auto", "Auto-detect"),
+        ("en", "English"),
+        ("ru", "Russian"),
+        ("es", "Spanish"),
+        ("fr", "French"),
+        ("de", "German"),
+        ("it", "Italian"),
+        ("pt", "Portuguese"),
+        ("ja", "Japanese"),
+        ("ko", "Korean"),
+        ("zh", "Chinese"),
+    ]
+
+    /// Language sent to the API. An explicit language is both more accurate and
+    /// faster than auto-detect on short clips, but guessing it from the system
+    /// locale is worse than not guessing: forcing the wrong language makes Whisper
+    /// transliterate instead of transcribe. Left to the user in Settings.
+    static var currentLanguage: String {
+        UserDefaults.standard.string(forKey: "recognitionLanguage") ?? "auto"
+    }
+}
+
 // MARK: - Transcription History
 
 struct TranscriptionEntry: Identifiable {
@@ -319,6 +398,28 @@ struct ErrorDetail: Codable {
 
 // MARK: - Errors
 
+/// Why a transcription request was retried — drives the user-facing message
+/// shown once all retry attempts are exhausted.
+enum RetryReason {
+    case noInternet
+    case connectionFailed
+    case rateLimit
+    case serverError
+
+    var userMessage: String {
+        switch self {
+        case .noInternet:
+            return "No internet connection. Check your network and try again."
+        case .connectionFailed:
+            return "Couldn't reach the server. Check your connection and try again."
+        case .rateLimit:
+            return "Rate limit reached. Try again in a moment."
+        case .serverError:
+            return "Service temporarily unavailable. Try again later."
+        }
+    }
+}
+
 enum RecognitionError: Error, LocalizedError {
     case noAPIKey
     case emptyAudio
@@ -327,7 +428,7 @@ enum RecognitionError: Error, LocalizedError {
     case invalidResponse
     case parsingError
     case apiError(String)
-    case maxRetriesExceeded
+    case maxRetriesExceeded(RetryReason)
     case networkError(String)
     
     var errorDescription: String? {
@@ -346,8 +447,8 @@ enum RecognitionError: Error, LocalizedError {
             return "Failed to parse server response."
         case .apiError(let message):
             return "API Error: \(message)"
-        case .maxRetriesExceeded:
-            return "Failed after maximum retry attempts. Please check your connection."
+        case .maxRetriesExceeded(let reason):
+            return reason.userMessage
         case .networkError(let message):
             return "Network Error: \(message)"
         }

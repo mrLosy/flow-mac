@@ -104,6 +104,22 @@ final class NotificationService {
         )
     }
 
+    func notifyQuotaWarning(remainingMinutes: Int, resetDate: String) {
+        send(
+            title: "Quota running low",
+            body: "Remaining: \(remainingMinutes) min. Resets \(resetDate).",
+            category: "QUOTA"
+        )
+    }
+
+    func notifyQuotaExhausted() {
+        send(
+            title: "Minutes exhausted",
+            body: "Upgrade your plan or wait for quota reset.",
+            category: "QUOTA"
+        )
+    }
+
     // MARK: - Private
 
     private func send(title: String, body: String, category: String, actionURL: String? = nil) {

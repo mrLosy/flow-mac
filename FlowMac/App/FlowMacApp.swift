@@ -22,6 +22,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var textInjector: TextInjector?
     var recordingOverlay: RecordingOverlayWindow?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        enforceSingleInstance()
+    }
+
+    /// Quit immediately if another FlowMac is already running, activating that one instead.
+    /// Prevents two copies (e.g. installed Desktop build + dev build from DerivedData) from
+    /// competing for the global hotkey and microphone.
+    private func enforceSingleInstance() {
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.flowmac.app"
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != myPID }
+        guard let existing = others.first else { return }
+
+        NSLog("[FlowMac] Another instance is already running (PID \(existing.processIdentifier)) — terminating self")
+        DistributedNotificationCenter.default().postNotificationName(
+            StatusBarController.showRequestNotification,
+            object: nil,
+            deliverImmediately: true
+        )
+        existing.activate(options: [])
+        exit(0)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         DebugLog.clear()
         DebugLog.printLocation()
@@ -29,12 +53,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ProcessInfo.processInfo.disableAutomaticTermination("Menu bar app")
 
         UserDefaults.standard.register(defaults: [
-            "soundFeedbackEnabled": true
+            "soundFeedbackEnabled": false
         ])
 
         setupNotifications()
 
         DebugLog.log("2. Initializing core services")
+        // Quota & subscription (singletons, init on first access)
+        _ = QuotaService.shared
+        _ = SubscriptionService.shared
+
         audioEngine = AudioEngine()
         recognitionService = RecognitionService()
         textInjector = TextInjector()

@@ -36,15 +36,35 @@ class StatusBarController: NSObject, ObservableObject {
     }
     
     private func setupStatusBar() {
+        statusItem.autosaveName = "FlowMacStatusItem"
+        statusItem.behavior = []
+        statusItem.isVisible = true
+
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "Flow Mac")
             button.action = #selector(togglePopover)
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        
+
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(handleShowRequest),
+            name: StatusBarController.showRequestNotification,
+            object: nil
+        )
+
         updateMenuIcon()
     }
+
+    @objc private func handleShowRequest() {
+        statusItem.isVisible = true
+        DebugLog.log("UI. show-request received — status item forced visible")
+        guard let button = statusItem.button else { return }
+        toggleMainPopover(button)
+    }
+
+    static let showRequestNotification = Notification.Name("com.flowmac.app.showStatusItem")
     
     private func setupPopover() {
         let popover = NSPopover()
@@ -55,6 +75,7 @@ class StatusBarController: NSObject, ObservableObject {
             audioEngine: audioEngine,
             recognitionService: recognitionService,
             textInjector: textInjector,
+            historyService: TranscriptionHistoryService.shared,
             openSettings: { [weak self] in
                 self?.openSettings()
             },
@@ -76,14 +97,33 @@ class StatusBarController: NSObject, ObservableObject {
                 self?.updateMenuIcon()
             }
             .store(in: &cancellables)
+
+        // Observe quota changes to update menu bar icon tint
+        QuotaService.shared.$state
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateMenuIcon() }
+            .store(in: &cancellables)
     }
-    
+
     private func updateMenuIcon() {
         guard let button = statusItem.button else { return }
 
         if isRecording {
             button.image = NSImage(systemSymbolName: "waveform.circle.fill", accessibilityDescription: "Recording")
             button.contentTintColor = .systemRed
+            return
+        }
+
+        let state = QuotaService.shared.state
+        if state.plan.usesBackend && state.isExhausted {
+            // Exhausted — use a symbol that visually warns
+            let warning = NSImage(systemSymbolName: "waveform.badge.exclamationmark", accessibilityDescription: "Quota exhausted")
+                ?? NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "Flow Mac")
+            button.image = warning
+            button.contentTintColor = .systemOrange
+        } else if state.plan.usesBackend && state.usageRatio >= 0.9 {
+            button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "Flow Mac")
+            button.contentTintColor = .systemOrange
         } else {
             button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "Flow Mac")
             button.contentTintColor = nil
@@ -212,4 +252,5 @@ class StatusBarController: NSObject, ObservableObject {
 extension Notification.Name {
     static let toggleRecording = Notification.Name("toggleRecording")
     static let hotkeyDidChange = Notification.Name("hotkeyDidChange")
+    static let retryTranscription = Notification.Name("retryTranscription")
 }

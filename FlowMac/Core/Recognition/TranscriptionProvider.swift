@@ -63,7 +63,9 @@ enum TranscriptionProvider: String, CaseIterable, Identifiable {
     var modelName: String {
         switch self {
         case .openai: return "whisper-1"
-        case .groq: return "whisper-large-v3-turbo"
+        // large-v3, not turbo: the distilled decoder in turbo drops word
+        // endings and agreement in inflected languages (ru/de/pl).
+        case .groq: return "whisper-large-v3"
         }
     }
 

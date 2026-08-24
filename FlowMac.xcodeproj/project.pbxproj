@@ -36,6 +36,14 @@
 		AABBCC0001 /* FlowMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000101 /* FlowMacApp.swift */; };
 		AA000030 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000213 /* NotificationService.swift */; };
 		AA000031 /* DebugLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000214 /* DebugLog.swift */; };
+		AA000032 /* AudioStorageService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000215 /* AudioStorageService.swift */; };
+		BB000001 /* QuotaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000101 /* QuotaModels.swift */; };
+		BB000002 /* QuotaService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000102 /* QuotaService.swift */; };
+		BB000003 /* SubscriptionProducts.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000103 /* SubscriptionProducts.swift */; };
+		BB000004 /* SubscriptionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000104 /* SubscriptionService.swift */; };
+		BB000005 /* PaywallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000105 /* PaywallView.swift */; };
+		BB000006 /* BackendAPIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000106 /* BackendAPIService.swift */; };
+		BB000007 /* AccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000107 /* AccountView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -71,6 +79,14 @@
 		00000402 /* FlowMac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FlowMac.entitlements; sourceTree = "<group>"; };
 		00000213 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		00000214 /* DebugLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLog.swift; sourceTree = "<group>"; };
+		00000215 /* AudioStorageService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioStorageService.swift; sourceTree = "<group>"; };
+		BB000101 /* QuotaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuotaModels.swift; sourceTree = "<group>"; };
+		BB000102 /* QuotaService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuotaService.swift; sourceTree = "<group>"; };
+		BB000103 /* SubscriptionProducts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionProducts.swift; sourceTree = "<group>"; };
+		BB000104 /* SubscriptionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionService.swift; sourceTree = "<group>"; };
+		BB000105 /* PaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaywallView.swift; sourceTree = "<group>"; };
+		BB000106 /* BackendAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendAPIService.swift; sourceTree = "<group>"; };
+		BB000107 /* AccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -116,8 +132,38 @@
 				00000027 /* PostProcessing */,
 				00000028 /* Metrics */,
 				00000029 /* Notifications */,
+				BB000010 /* Quota */,
+				BB000011 /* Subscription */,
+				BB000012 /* Backend */,
 			);
 			path = Core;
+			sourceTree = "<group>";
+		};
+		BB000010 /* Quota */ = {
+			isa = PBXGroup;
+			children = (
+				BB000101 /* QuotaModels.swift */,
+				BB000102 /* QuotaService.swift */,
+			);
+			path = Quota;
+			sourceTree = "<group>";
+		};
+		BB000011 /* Subscription */ = {
+			isa = PBXGroup;
+			children = (
+				BB000103 /* SubscriptionProducts.swift */,
+				BB000104 /* SubscriptionService.swift */,
+				BB000105 /* PaywallView.swift */,
+			);
+			path = Subscription;
+			sourceTree = "<group>";
+		};
+		BB000012 /* Backend */ = {
+			isa = PBXGroup;
+			children = (
+				BB000106 /* BackendAPIService.swift */,
+			);
+			path = Backend;
 			sourceTree = "<group>";
 		};
 		00000029 /* Notifications */ = {
@@ -167,6 +213,7 @@
 				00000202 /* AudioCaptureServiceProtocol.swift */,
 				0000020D /* AudioValidator.swift */,
 				0000020E /* MicVolumeManager.swift */,
+				00000215 /* AudioStorageService.swift */,
 			);
 			path = Audio;
 			sourceTree = "<group>";
@@ -237,6 +284,7 @@
 				00000305 /* SettingsTabContent.swift */,
 				00000306 /* ShortcutRecorder.swift */,
 				00000307 /* ProviderSettingsView.swift */,
+				BB000107 /* AccountView.swift */,
 			);
 			path = Settings;
 			sourceTree = "<group>";
@@ -363,6 +411,14 @@
 				AA000020 /* UsageMetricsService.swift in Sources */,
 				AA000021 /* UsageMetricsView.swift in Sources */,
 				AA000031 /* DebugLog.swift in Sources */,
+				AA000032 /* AudioStorageService.swift in Sources */,
+				BB000001 /* QuotaModels.swift in Sources */,
+				BB000002 /* QuotaService.swift in Sources */,
+				BB000003 /* SubscriptionProducts.swift in Sources */,
+				BB000004 /* SubscriptionService.swift in Sources */,
+				BB000005 /* PaywallView.swift in Sources */,
+				BB000006 /* BackendAPIService.swift in Sources */,
+				BB000007 /* AccountView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
