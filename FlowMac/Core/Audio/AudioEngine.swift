@@ -166,6 +166,9 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
         if audioEngine.isRunning {
             audioEngine.stop()
         }
+        // After a wake the graph still references the pre-sleep HAL device; reset()
+        // drops that state so the node reports the format the hardware actually has.
+        audioEngine.reset()
 
         _ = applySelectedAudioDeviceIfNeeded()
 
@@ -185,7 +188,11 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
         setupConverter(inputFormat: inputFormat)
 
         let targetFormat = self.targetFormat
-        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { [weak self] buffer, _ in
+        // format: nil means "whatever this bus actually outputs". Pinning a format here
+        // makes installTap assert that it equals the hardware format, and the value we
+        // just read goes stale the moment the device switches or the machine wakes —
+        // which is exactly when this runs. The buffer carries its own format instead.
+        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nil) { [weak self] buffer, _ in
             guard let self else { return }
             self.captureLock.lock()
             self.lastTapBufferTime = CFAbsoluteTimeGetCurrent()
@@ -193,7 +200,7 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
             self.captureLock.unlock()
 
             if isCapturing {
-                self.processAudioBuffer(buffer, inputFormat: inputFormat, targetFormat: targetFormat)
+                self.processAudioBuffer(buffer, inputFormat: buffer.format, targetFormat: targetFormat)
             }
         }
 
@@ -351,6 +358,12 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
         // If no conversion needed, extract data directly
         if buffer.format.sampleRate == targetSampleRate && buffer.format.channelCount == 1 {
             return buffer
+        }
+
+        // The tap is not pinned to a format, so the hardware can start delivering a
+        // different one after a device switch or a wake — rebuild the converter to match.
+        if converter?.inputFormat != buffer.format {
+            setupConverter(inputFormat: buffer.format)
         }
 
         guard let converter = self.converter else { return nil }
