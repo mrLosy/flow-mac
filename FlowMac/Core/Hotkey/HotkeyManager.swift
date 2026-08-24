@@ -89,6 +89,35 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
             self, selector: #selector(handleRetryNotification(_:)),
             name: .retryTranscription, object: nil
         )
+
+        // System sleep/wake — CGEventTap can be silently invalidated across these
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceCenter.addObserver(
+            self, selector: #selector(handleSystemWake),
+            name: NSWorkspace.didWakeNotification, object: nil
+        )
+        workspaceCenter.addObserver(
+            self, selector: #selector(handleSystemWake),
+            name: NSWorkspace.screensDidWakeNotification, object: nil
+        )
+        workspaceCenter.addObserver(
+            self, selector: #selector(handleSystemWake),
+            name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil
+        )
+
+        // Screen lock/unlock (no sleep) — only delivered via distributed center
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleSystemWake),
+            name: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil
+        )
+    }
+
+    @objc private func handleSystemWake() {
+        DebugLog.log("WAKE. system wake/unlock — restoring hotkey + audio")
+        // Tap can be present but disabled, or completely invalidated. Cheapest
+        // fix is to fully recreate it; setupHotkey() also handles the fallback path.
+        setupHotkey()
+        audioEngine.restartIfNeeded()
     }
 
     @objc private func handleToggleNotification() { toggleRecording() }
@@ -107,7 +136,22 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
         let modeRaw = userInfo["mode"] as? String ?? RecordingMode.toggle.rawValue
         let mode = RecordingMode(rawValue: modeRaw) ?? .toggle
         let modifiers = NSEvent.ModifierFlags(rawValue: modifiersRaw)
-        updateHotkey(mode: mode, keyCode: keyCode, modifiers: modifiers)
+        let modifierSides = userInfo["modifierSides"] as? UInt32 ?? 0
+        updateHotkey(mode: mode, keyCode: keyCode, modifiers: modifiers, modifierSides: modifierSides)
+    }
+
+    // MARK: - Mode Enable Flags
+
+    /// User-controlled enable toggles from Shortcuts settings. Defaults match
+    /// SettingsView's @State initializers: toggle/PTT default on, express off.
+    var isToggleEnabled: Bool {
+        UserDefaults.standard.object(forKey: "toggleModeEnabled") as? Bool ?? true
+    }
+    var isPTTEnabled: Bool {
+        UserDefaults.standard.object(forKey: "pttModeEnabled") as? Bool ?? true
+    }
+    var isExpressEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "expressModeEnabled")
     }
 
     // MARK: - Settings Persistence
@@ -125,10 +169,13 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
 
         if let kc = UserDefaults.standard.object(forKey: "toggleHotkeyKeyCode") as? UInt32 { toggleHotkey.keyCode = kc }
         if let m = UserDefaults.standard.object(forKey: "toggleHotkeyModifiers") as? UInt32 { toggleHotkey.modifiers = m }
+        if let s = UserDefaults.standard.object(forKey: "toggleHotkeyModifierSides") as? UInt32 { toggleHotkey.modifierSides = s }
         if let kc = UserDefaults.standard.object(forKey: "pttHotkeyKeyCode") as? UInt32 { pttHotkey.keyCode = kc }
         if let m = UserDefaults.standard.object(forKey: "pttHotkeyModifiers") as? UInt32 { pttHotkey.modifiers = m }
+        if let s = UserDefaults.standard.object(forKey: "pttHotkeyModifierSides") as? UInt32 { pttHotkey.modifierSides = s }
         if let kc = UserDefaults.standard.object(forKey: "expressHotkeyKeyCode") as? UInt32 { expressHotkey.keyCode = kc }
         if let m = UserDefaults.standard.object(forKey: "expressHotkeyModifiers") as? UInt32 { expressHotkey.modifiers = m }
+        if let s = UserDefaults.standard.object(forKey: "expressHotkeyModifierSides") as? UInt32 { expressHotkey.modifierSides = s }
     }
 
     private func saveHotkey(_ config: HotkeyConfig, mode: RecordingMode) {
@@ -140,6 +187,7 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
         }
         UserDefaults.standard.set(config.keyCode, forKey: "\(prefix)KeyCode")
         UserDefaults.standard.set(config.modifiers, forKey: "\(prefix)Modifiers")
+        UserDefaults.standard.set(config.modifierSides, forKey: "\(prefix)ModifierSides")
     }
 
     // MARK: - Hotkey Setup
@@ -338,6 +386,13 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
             return
         }
 
+        // Check quota before sending to API (backend plans only)
+        let estimatedSeconds = Int(ceil(recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0))
+        if !QuotaService.shared.canTranscribe(audioDurationSeconds: max(1, estimatedSeconds)) {
+            NotificationService.shared.notifyQuotaExhausted()
+            return
+        }
+
         // Save audio to disk before transcription so we can retry on failure
         let entryID = UUID()
         let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
@@ -353,6 +408,8 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
                         if let fileName = audioFileName { AudioStorageService.shared.delete(fileName: fileName) }
                         return
                     }
+                    // Consume quota only when transcription produced usable text
+                    QuotaService.shared.consumeSeconds(max(1, estimatedSeconds))
                     // Semantic correction (optional LLM post-processing)
                     let category = AppCategory.detect(bundleIdentifier: self?.previousApp?.bundleIdentifier)
                     SemanticCorrectionService.shared.correct(text: cleanedText, category: category) { finalText in
@@ -405,23 +462,27 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
 
     // MARK: - Update Hotkey
 
-    func updateHotkey(mode: RecordingMode, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
+    func updateHotkey(mode: RecordingMode, keyCode: UInt16, modifiers: NSEvent.ModifierFlags, modifierSides: UInt32 = 0) {
         var cgFlags: CGEventFlags = []
         if modifiers.contains(.command) { cgFlags.insert(.maskCommand) }
         if modifiers.contains(.shift) { cgFlags.insert(.maskShift) }
         if modifiers.contains(.option) { cgFlags.insert(.maskAlternate) }
         if modifiers.contains(.control) { cgFlags.insert(.maskControl) }
-        updateHotkey(mode: mode, keyCode: CGKeyCode(keyCode), modifiers: cgFlags)
+        updateHotkey(mode: mode, keyCode: CGKeyCode(keyCode), modifiers: cgFlags, modifierSides: modifierSides)
     }
 
     func updateHotkey(mode: RecordingMode, keyCode: CGKeyCode, modifiers: CGEventFlags) {
+        updateHotkey(mode: mode, keyCode: keyCode, modifiers: modifiers, modifierSides: 0)
+    }
+
+    func updateHotkey(mode: RecordingMode, keyCode: CGKeyCode, modifiers: CGEventFlags, modifierSides: UInt32) {
         var carbonMods: UInt32 = 0
         if modifiers.contains(.maskCommand) { carbonMods |= UInt32(cmdKey) }
         if modifiers.contains(.maskShift) { carbonMods |= UInt32(shiftKey) }
         if modifiers.contains(.maskAlternate) { carbonMods |= UInt32(optionKey) }
         if modifiers.contains(.maskControl) { carbonMods |= UInt32(controlKey) }
 
-        let config = HotkeyConfig(keyCode: UInt32(keyCode), modifiers: carbonMods)
+        let config = HotkeyConfig(keyCode: UInt32(keyCode), modifiers: carbonMods, modifierSides: modifierSides)
         switch mode {
         case .toggle: toggleHotkey = config
         case .pushToTalk: pttHotkey = config
@@ -449,10 +510,18 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
 
     static func hotkeyDisplayString(_ config: HotkeyConfig) -> String {
         var parts: [String] = []
-        if (config.modifiers & UInt32(cmdKey)) != 0 { parts.append("⌘") }
-        if (config.modifiers & UInt32(shiftKey)) != 0 { parts.append("⇧") }
-        if (config.modifiers & UInt32(optionKey)) != 0 { parts.append("⌥") }
-        if (config.modifiers & UInt32(controlKey)) != 0 { parts.append("⌃") }
+        if (config.modifiers & UInt32(cmdKey)) != 0 {
+            parts.append("⌘" + sideSuffix(config.side(for: ModifierSideSlot.cmd)))
+        }
+        if (config.modifiers & UInt32(shiftKey)) != 0 {
+            parts.append("⇧" + sideSuffix(config.side(for: ModifierSideSlot.shift)))
+        }
+        if (config.modifiers & UInt32(optionKey)) != 0 {
+            parts.append("⌥" + sideSuffix(config.side(for: ModifierSideSlot.option)))
+        }
+        if (config.modifiers & UInt32(controlKey)) != 0 {
+            parts.append("⌃" + sideSuffix(config.side(for: ModifierSideSlot.control)))
+        }
 
         let keyNames: [UInt32: String] = [
             49: "Space", 36: "↵", 51: "⌫", 53: "Esc",
@@ -464,6 +533,14 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
         } else if config.keyCode > 25 { parts.append("Key\(config.keyCode)") }
 
         return parts.joined(separator: "+")
+    }
+
+    static func sideSuffix(_ side: ModifierSide) -> String {
+        switch side {
+        case .left: return "L"
+        case .right: return "R"
+        case .any: return ""
+        }
     }
 
     // MARK: - Metrics
@@ -501,13 +578,17 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
                         TranscriptionHistoryService.shared.updateError(id: entryID, message: "Речь не обнаружена")
                         return
                     }
-                    TranscriptionHistoryService.shared.markAsSucceeded(id: entryID, text: cleanedText)
-                    AudioStorageService.shared.delete(fileName: audioFileName)
-                    UsageMetricsService.shared.recordSession(duration: entry.duration, text: cleanedText)
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(cleanedText, forType: .string)
-                    NotificationService.shared.notifyRetrySuccess()
-                    NSLog("[FlowMac] Retry succeeded for entry %@", entryID.uuidString)
+                    // A retry lands on the pasteboard rather than a focused field, so
+                    // there is no target app to categorise — correct as general text.
+                    SemanticCorrectionService.shared.correct(text: cleanedText, category: .general) { finalText in
+                        TranscriptionHistoryService.shared.markAsSucceeded(id: entryID, text: finalText)
+                        AudioStorageService.shared.delete(fileName: audioFileName)
+                        UsageMetricsService.shared.recordSession(duration: entry.duration, text: finalText)
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(finalText, forType: .string)
+                        NotificationService.shared.notifyRetrySuccess()
+                        NSLog("[FlowMac] Retry succeeded for entry %@", entryID.uuidString)
+                    }
                 case .failure(let error):
                     NSLog("[FlowMac] Retry failed for entry %@: %@", entryID.uuidString, error.localizedDescription)
                     TranscriptionHistoryService.shared.updateError(id: entryID, message: error.localizedDescription)
@@ -568,6 +649,8 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
     deinit {
         stopMonitoring()
         NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        DistributedNotificationCenter.default().removeObserver(self)
         HotkeyManager.sharedManager = nil
     }
 }

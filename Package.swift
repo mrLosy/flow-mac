@@ -27,6 +27,14 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("UserNotifications")
             ]
+        ),
+        // Only Unit/ is built: the older suites under Core/ and Integration/ predate
+        // several API changes and no longer compile.
+        .testTarget(
+            name: "FlowMacTests",
+            dependencies: ["FlowMac"],
+            path: "FlowMacTests",
+            sources: ["Unit"]
         )
     ]
 )

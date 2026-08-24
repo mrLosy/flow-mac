@@ -4,6 +4,7 @@ import AVFoundation
 import Carbon
 
 enum SettingsTab: String, CaseIterable, Identifiable {
+    case account = "Account"
     case general = "General"
     case shortcuts = "Shortcuts"
     case audio = "Audio"
@@ -14,6 +15,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
+        case .account: return "person.crop.circle"
         case .general: return "gearshape"
         case .shortcuts: return "keyboard"
         case .audio: return "waveform"
@@ -39,10 +41,13 @@ struct SettingsView: View {
     @State var selectedLanguage = "auto"
     @State var hotkeyKeyCode: UInt16 = 49
     @State var hotkeyModifiers: NSEvent.ModifierFlags = [.command, .shift]
+    @State var hotkeyModifierSides: UInt32 = 0
     @State var pttKeyCode: UInt16 = 2  // D key
     @State var pttModifiers: NSEvent.ModifierFlags = [.command, .shift]
+    @State var pttModifierSides: UInt32 = 0
     @State var expressKeyCode: UInt16 = 0
     @State var expressModifiers: NSEvent.ModifierFlags = []
+    @State var expressModifierSides: UInt32 = 0
     @State var transcriptionPrompt: String = ""
     @State var showAccessibilityAlert = false
     @State var hasAccessibilityPermission = false
@@ -58,19 +63,7 @@ struct SettingsView: View {
     @State var autoBoostMicVolume = UserDefaults.standard.bool(forKey: "autoBoostMicVolume")
     @State var semanticCorrectionEnabled = UserDefaults.standard.bool(forKey: "semanticCorrectionEnabled")
 
-    let languages = [
-        ("auto", "Auto-detect"),
-        ("en", "English"),
-        ("ru", "Russian"),
-        ("es", "Spanish"),
-        ("fr", "French"),
-        ("de", "German"),
-        ("it", "Italian"),
-        ("pt", "Portuguese"),
-        ("ja", "Japanese"),
-        ("ko", "Korean"),
-        ("zh", "Chinese"),
-    ]
+    let languages = RecognitionService.supportedLanguages
 
     var configuredProviders: [TranscriptionProvider] {
         TranscriptionProvider.allCases.filter { providerAPIKeys[$0]?.isEmpty == false }
@@ -157,6 +150,7 @@ struct SettingsView: View {
                     .padding(.bottom, 20)
 
                 switch selectedTab {
+                case .account: AccountView()
                 case .general: generalContent
                 case .shortcuts: shortcutsContent
                 case .audio: audioContent
@@ -178,8 +172,8 @@ struct SettingsView: View {
         providerAPIKeys = Dictionary(
             uniqueKeysWithValues: TranscriptionProvider.allCases.map { ($0, $0.apiKey) }
         )
-        selectedLanguage = UserDefaults.standard.string(forKey: "recognitionLanguage") ?? "auto"
-        selectedDeviceID = UserDefaults.standard.string(forKey: "selectedAudioDevice") ?? "default"
+        selectedLanguage = RecognitionService.currentLanguage
+        selectedDeviceID = AudioDeviceLookup.selectedDeviceUID()
         // Toggle hotkey (migrated keys or new keys)
         if let savedKeyCode = UserDefaults.standard.object(forKey: "toggleHotkeyKeyCode") as? UInt32 {
             hotkeyKeyCode = UInt16(savedKeyCode)
@@ -191,6 +185,9 @@ struct SettingsView: View {
         } else if let savedModifiers = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt32 {
             hotkeyModifiers = carbonToNSEventModifiers(savedModifiers)
         }
+        if let savedSides = UserDefaults.standard.object(forKey: "toggleHotkeyModifierSides") as? UInt32 {
+            hotkeyModifierSides = savedSides
+        }
         // PTT hotkey
         if let savedKeyCode = UserDefaults.standard.object(forKey: "pttHotkeyKeyCode") as? UInt32 {
             pttKeyCode = UInt16(savedKeyCode)
@@ -198,12 +195,18 @@ struct SettingsView: View {
         if let savedModifiers = UserDefaults.standard.object(forKey: "pttHotkeyModifiers") as? UInt32 {
             pttModifiers = carbonToNSEventModifiers(savedModifiers)
         }
+        if let savedSides = UserDefaults.standard.object(forKey: "pttHotkeyModifierSides") as? UInt32 {
+            pttModifierSides = savedSides
+        }
         // Express hotkey
         if let savedKeyCode = UserDefaults.standard.object(forKey: "expressHotkeyKeyCode") as? UInt32 {
             expressKeyCode = UInt16(savedKeyCode)
         }
         if let savedModifiers = UserDefaults.standard.object(forKey: "expressHotkeyModifiers") as? UInt32 {
             expressModifiers = carbonToNSEventModifiers(savedModifiers)
+        }
+        if let savedSides = UserDefaults.standard.object(forKey: "expressHotkeyModifierSides") as? UInt32 {
+            expressModifierSides = savedSides
         }
         // Transcription prompt
         transcriptionPrompt = UserDefaults.standard.string(forKey: "transcriptionPrompt") ?? ""
@@ -347,8 +350,10 @@ struct SettingsView: View {
             var name: CFString = "" as CFString
             var nameSize = UInt32(MemoryLayout<CFString>.size)
             res = AudioObjectGetPropertyData(devID, &nameAddr, 0, nil, &nameSize, &name)
-            if res == noErr {
-                devices.append(AVAudioDevice(id: String(devID), name: name as String, objectID: devID))
+            // Identify by UID, not by AudioDeviceID: the id changes on every reconnect,
+            // so a stored numeric id points at an arbitrary device the next time around.
+            if res == noErr, let uid = AudioDeviceLookup.uid(of: devID) {
+                devices.append(AVAudioDevice(id: uid, name: name as String, objectID: devID))
             }
         }
         availableInputDevices = devices
@@ -367,7 +372,9 @@ struct SettingsView: View {
     // MARK: - Helpers
 
     var shortcutConflict: Bool {
-        hotkeyKeyCode == pttKeyCode && hotkeyModifiers == pttModifiers
+        hotkeyKeyCode == pttKeyCode
+            && hotkeyModifiers == pttModifiers
+            && hotkeyModifierSides == pttModifierSides
     }
 
     func carbonToNSEventModifiers(_ carbon: UInt32) -> NSEvent.ModifierFlags {

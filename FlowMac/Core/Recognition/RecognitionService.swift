@@ -282,7 +282,7 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
         body.append("\(provider.modelName)\r\n".data(using: .utf8)!)
         
         // Add language parameter
-        let language = UserDefaults.standard.string(forKey: "recognitionLanguage") ?? "auto"
+        let language = RecognitionService.currentLanguage
         if language != "auto" {
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
             body.append("Content-Disposition: form-data; name=\"language\"\r\n\r\n".data(using: .utf8)!)
@@ -339,6 +339,33 @@ class RecognitionService: NSObject, ObservableObject, WhisperRecognitionServiceP
         
         // For streaming, we process smaller chunks
         performTranscription(audioData: audioData, completion: completion)
+    }
+}
+
+// MARK: - Language
+
+extension RecognitionService {
+    /// Whisper languages offered in Settings: (ISO-639-1 code, display name).
+    static let supportedLanguages: [(String, String)] = [
+        ("auto", "Auto-detect"),
+        ("en", "English"),
+        ("ru", "Russian"),
+        ("es", "Spanish"),
+        ("fr", "French"),
+        ("de", "German"),
+        ("it", "Italian"),
+        ("pt", "Portuguese"),
+        ("ja", "Japanese"),
+        ("ko", "Korean"),
+        ("zh", "Chinese"),
+    ]
+
+    /// Language sent to the API. An explicit language is both more accurate and
+    /// faster than auto-detect on short clips, but guessing it from the system
+    /// locale is worse than not guessing: forcing the wrong language makes Whisper
+    /// transliterate instead of transcribe. Left to the user in Settings.
+    static var currentLanguage: String {
+        UserDefaults.standard.string(forKey: "recognitionLanguage") ?? "auto"
     }
 }
 

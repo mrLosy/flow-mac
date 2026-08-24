@@ -84,7 +84,7 @@ extension SettingsView {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
-                        ShortcutRecorderView(mode: .toggle, keyCode: $hotkeyKeyCode, modifiers: $hotkeyModifiers)
+                        ShortcutRecorderView(mode: .toggle, keyCode: $hotkeyKeyCode, modifiers: $hotkeyModifiers, modifierSides: $hotkeyModifierSides)
                             .frame(width: 140, height: 32)
                     }
                 }
@@ -106,7 +106,7 @@ extension SettingsView {
                                     .foregroundColor(.secondary)
                             }
                             Spacer()
-                            ShortcutRecorderView(mode: .pushToTalk, keyCode: $pttKeyCode, modifiers: $pttModifiers)
+                            ShortcutRecorderView(mode: .pushToTalk, keyCode: $pttKeyCode, modifiers: $pttModifiers, modifierSides: $pttModifierSides)
                                 .frame(width: 140, height: 32)
                         }
 
@@ -140,7 +140,7 @@ extension SettingsView {
                                     .foregroundColor(.secondary)
                             }
                             Spacer()
-                            ShortcutRecorderView(mode: .express, keyCode: $expressKeyCode, modifiers: $expressModifiers)
+                            ShortcutRecorderView(mode: .express, keyCode: $expressKeyCode, modifiers: $expressModifiers, modifierSides: $expressModifierSides)
                                 .frame(width: 140, height: 32)
                         }
                     }
@@ -194,7 +194,7 @@ extension SettingsView {
                     .labelsHidden()
                     .frame(maxWidth: 280)
                     .onChange(of: selectedDeviceID) { newValue in
-                        UserDefaults.standard.set(newValue, forKey: "selectedAudioDevice")
+                        UserDefaults.standard.set(newValue, forKey: AudioDeviceLookup.selectionKey)
                     }
                 }
 
