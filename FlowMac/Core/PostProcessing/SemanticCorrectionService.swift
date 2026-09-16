@@ -210,7 +210,9 @@ final class SemanticCorrectionService {
         let bChars = Array(b)
         let m = aChars.count
         let n = bChars.count
-        guard m > 0 || n > 0 else { return 0 }
+        // Both loops below are `1...count` and trap on an empty side. Two empty
+        // strings are identical; one empty side is a complete rewrite.
+        guard m > 0, n > 0 else { return m == n ? 0 : 1 }
 
         var prev = Array(0...n)
         var curr = [Int](repeating: 0, count: n + 1)

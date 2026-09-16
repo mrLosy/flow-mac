@@ -27,7 +27,7 @@ struct PersistentTranscriptionEntry: Codable, Identifiable {
         self.audioFileName = nil
     }
 
-    init(failedWithID id: UUID, duration: TimeInterval, provider: String, audioFileName: String, errorMessage: String) {
+    init(failedWithID id: UUID, duration: TimeInterval, provider: String, audioFileName: String?, errorMessage: String) {
         self.id = id
         self.text = ""
         self.timestamp = Date()
