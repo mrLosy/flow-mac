@@ -22,7 +22,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var textInjector: TextInjector?
     var recordingOverlay: RecordingOverlayWindow?
 
+    /// XCTest loads its framework into the host before `main`. Under test the app only
+    /// has to exist as a bundle to link against — not claim the hotkey, the microphone
+    /// or the debug log, and not quit because the installed copy is already running.
+    private var isRunningTests: Bool {
+        NSClassFromString("XCTestCase") != nil
+    }
+
     func applicationWillFinishLaunching(_ notification: Notification) {
+        guard !isRunningTests else { return }
         enforceSingleInstance()
     }
 
@@ -47,6 +55,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !isRunningTests else { return }
         DebugLog.clear()
         DebugLog.printLocation()
         DebugLog.log("1. applicationDidFinishLaunching CALLED")

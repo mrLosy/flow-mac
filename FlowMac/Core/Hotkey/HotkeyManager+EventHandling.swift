@@ -15,6 +15,9 @@ extension HotkeyManager {
             return false
         }
 
+        // Recording a new shortcut in Settings — pass everything through untouched.
+        if isCapturingShortcut { return false }
+
         if type == .flagsChanged {
             let mods = currentCarbonModifiers(from: event)
             DebugLog.log("EV. flagsChanged mods=\(mods)")
@@ -212,6 +215,7 @@ extension HotkeyManager {
 extension HotkeyManager {
 
     func handleNSKeyEvent(_ event: NSEvent, isDown: Bool) {
+        if isCapturingShortcut { return }
         let keyCode = UInt32(event.keyCode)
         let carbonMods = nsEventToCarbonModifiers(event.modifierFlags)
         let rawFlags = UInt64(event.modifierFlags.rawValue)
@@ -255,6 +259,7 @@ extension HotkeyManager {
     }
 
     func handleNSFlagsEvent(_ event: NSEvent) {
+        if isCapturingShortcut { return }
         let carbonMods = nsEventToCarbonModifiers(event.modifierFlags)
         let rawFlags = UInt64(event.modifierFlags.rawValue)
 

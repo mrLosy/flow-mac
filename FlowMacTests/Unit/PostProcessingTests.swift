@@ -86,6 +86,28 @@ final class PostProcessingTests: XCTestCase {
         XCTAssertEqual(SemanticCorrectionService.normalizedEditDistance("abc", "xyz"), 1.0)
     }
 
+    func testNormalizedEditDistanceHandlesEmptySides() {
+        XCTAssertEqual(SemanticCorrectionService.normalizedEditDistance("", ""), 0.0)
+        XCTAssertEqual(SemanticCorrectionService.normalizedEditDistance("abc", ""), 1.0)
+        XCTAssertEqual(SemanticCorrectionService.normalizedEditDistance("", "abc"), 1.0)
+    }
+
+    func testCompletionBudgetScalesWithInputAndIsCapped() {
+        XCTAssertEqual(SemanticCorrectionService.completionBudget(for: ""), 1024)
+        XCTAssertEqual(SemanticCorrectionService.completionBudget(for: String(repeating: "а", count: 4000)), 5024)
+        XCTAssertEqual(SemanticCorrectionService.completionBudget(for: String(repeating: "а", count: 20000)), 8192)
+    }
+
+    /// A model that spends its whole token budget on reasoning returns empty content;
+    /// that must degrade to "no correction", not crash the app.
+    func testSafeMergeKeepsOriginalWhenCorrectionIsEmpty() {
+        let original = "привет как дела"
+        XCTAssertEqual(
+            SemanticCorrectionService.safeMerge(original: original, corrected: "", maxChangeRatio: 0.25),
+            original
+        )
+    }
+
     // MARK: - AppCategory
 
     func testDetectsCategoryFromBundleIdentifier() {

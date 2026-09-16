@@ -35,6 +35,13 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
     private var expressTimer: Timer?
     private let expressMaxDuration: TimeInterval = 300 // 5 min safety limit
 
+    /// True while the Settings shortcut recorder is capturing a new combo. The event tap
+    /// must stay installed (removing it mid-capture races with the recorder's monitors),
+    /// but it must not act on or swallow anything: otherwise pressing the combo you are
+    /// about to assign fires the *current* hotkey, and a matching key is consumed before
+    /// the recorder ever sees it.
+    var isCapturingShortcut = false
+
     // Modifier-only detection state
     var toggleModOnlyPending = false
     var toggleModOnlyKeyWasPressed = false
@@ -398,6 +405,17 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
         let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
         let audioFileName = AudioStorageService.shared.save(audioData: audioData, id: entryID)
 
+        // Register the entry before the request goes out. If the process dies
+        // mid-flight the audio is then referenced from history (so the orphan
+        // sweep on next launch keeps it) and shows up as retryable.
+        TranscriptionHistoryService.shared.add(PersistentTranscriptionEntry(
+            failedWithID: entryID,
+            duration: duration,
+            provider: TranscriptionProvider.current.displayName,
+            audioFileName: audioFileName,
+            errorMessage: "Транскрипция прервана"
+        ))
+
         recognitionService.transcribe(audioData: audioData) { [weak self] result in
             DispatchQueue.main.async {
                 switch result {
@@ -405,11 +423,14 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
                     let cleanedText = TranscriptionCleaner.clean(text)
                     guard !cleanedText.isEmpty else {
                         NotificationService.shared.notifyNoSpeech()
-                        if let fileName = audioFileName { AudioStorageService.shared.delete(fileName: fileName) }
+                        TranscriptionHistoryService.shared.delete(id: entryID)
                         return
                     }
                     // Consume quota only when transcription produced usable text
                     QuotaService.shared.consumeSeconds(max(1, estimatedSeconds))
+                    // The words are in hand — persist them now, before correction
+                    // and injection get a chance to fail or crash.
+                    TranscriptionHistoryService.shared.markAsSucceeded(id: entryID, text: cleanedText)
                     // Semantic correction (optional LLM post-processing)
                     let category = AppCategory.detect(bundleIdentifier: self?.previousApp?.bundleIdentifier)
                     SemanticCorrectionService.shared.correct(text: cleanedText, category: category) { finalText in
@@ -435,6 +456,9 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
                                 NSLog("[FlowMac] Text injection failed: \(error.localizedDescription)")
                                 NotificationService.shared.notifyInjectionError(error.localizedDescription)
                             }
+                            // Keep the corrected text in history even if injection failed —
+                            // the user can still copy it from the menu.
+                            TranscriptionHistoryService.shared.markAsSucceeded(id: entryID, text: finalText)
                             // Audio transcribed successfully — delete the saved file
                             if let fileName = audioFileName { AudioStorageService.shared.delete(fileName: fileName) }
                         }
@@ -443,18 +467,7 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
                     NSLog("[FlowMac] Transcription error: \(error)")
                     NotificationService.shared.notifyTranscriptionError(error.localizedDescription)
                     self?.recordingStartTime = nil
-                    // Save failed entry with audio reference for retry
-                    if let fileName = audioFileName {
-                        let failedEntry = PersistentTranscriptionEntry(
-                            failedWithID: entryID,
-                            duration: duration,
-                            provider: TranscriptionProvider.current.displayName,
-                            audioFileName: fileName,
-                            errorMessage: error.localizedDescription
-                        )
-                        TranscriptionHistoryService.shared.add(failedEntry)
-                        NSLog("[FlowMac] Saved failed transcription entry %@ with audio %@", entryID.uuidString, fileName)
-                    }
+                    TranscriptionHistoryService.shared.updateError(id: entryID, message: error.localizedDescription)
                 }
             }
         }
@@ -547,7 +560,6 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
 
     private func recordSuccessMetrics(text: String) {
         let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
-        TranscriptionHistoryService.shared.add(text: text, provider: TranscriptionProvider.current.displayName)
         UsageMetricsService.shared.recordSession(duration: duration, text: text)
         recordingStartTime = nil
     }
