@@ -76,16 +76,11 @@ class ShortcutRecorder: NSView {
     private var maxModifiersSeen: NSEvent.ModifierFlags = []
     private var sidesSeen: UInt32 = 0
     private var keyPressedWhileRecording = false
-    private var holdTimer: Timer?
     private var keyMonitor: Any?
     private var globalKeyMonitor: Any?
     private var flagsMonitor: Any?
     private var globalFlagsMonitor: Any?
-
-    /// How long a modifier combo must be held (unchanged) before it's committed
-    /// as a modifier-only shortcut. Long enough that a user who intends a combo
-    /// (Cmd+Shift+V) has time to press the non-modifier key.
-    private static let modifierOnlyHoldDelay: TimeInterval = 1.2
+    private var resignKeyObserver: NSObjectProtocol?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -139,9 +134,17 @@ class ShortcutRecorder: NSView {
         maxModifiersSeen = []
         sidesSeen = 0
         keyPressedWhileRecording = false
-        holdTimer?.invalidate()
-        holdTimer = nil
+        // The global hotkeys must not fire while we capture their replacement.
+        HotkeyManager.sharedManager?.isCapturingShortcut = true
         setNeedsDisplay(bounds)
+
+        if let window {
+            resignKeyObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResignKeyNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                self?.cancelRecording()
+            }
+        }
 
         let handleKey: (NSEvent) -> Void = { [weak self] event in
             guard let self, self.isRecording else { return }
@@ -179,26 +182,19 @@ class ShortcutRecorder: NSView {
                 mods: curr,
                 into: sidesSeen
             )
+            setNeedsDisplay(bounds)
+            return
         }
 
-        setNeedsDisplay(bounds)
-
-        // Reset hold timer: only commit modifier-only after the combo stays unchanged
-        // for `modifierOnlyHoldDelay` seconds. If the user then presses a regular key,
-        // the keyDown path wins and cancels the timer.
-        holdTimer?.invalidate()
-        holdTimer = nil
-
-        guard !curr.isEmpty, !keyPressedWhileRecording else { return }
-
-        let snapshot = curr
-        let snapshotSides = sidesSeen
-        holdTimer = Timer.scheduledTimer(withTimeInterval: Self.modifierOnlyHoldDelay, repeats: false) { [weak self] _ in
-            guard let self, self.isRecording,
-                  !self.keyPressedWhileRecording,
-                  self.liveModifiers == snapshot else { return }
-            self.commit(keyCode: 0, modifiers: snapshot, sides: snapshotSides)
+        // Every modifier is up again. If a regular key was pressed in between, that combo
+        // has already been committed; otherwise the user meant a modifier-only shortcut.
+        // Committing on release (rather than after a hold timeout) keeps it deterministic:
+        // press the combo, let go, done.
+        guard !keyPressedWhileRecording, !maxModifiersSeen.isEmpty else {
+            setNeedsDisplay(bounds)
+            return
         }
+        commit(keyCode: 0, modifiers: maxModifiersSeen, sides: sidesSeen)
     }
 
     private func handleKeyEvent(_ event: NSEvent) {
@@ -214,12 +210,14 @@ class ShortcutRecorder: NSView {
             return
         }
 
-        keyPressedWhileRecording = true
-        holdTimer?.invalidate()
-        holdTimer = nil
-
         let eventMods = event.modifierFlags.intersection([.command, .option, .control, .shift])
         let finalMods = maxModifiersSeen.union(eventMods)
+
+        // A bare letter or digit as a global hotkey would swallow that key everywhere,
+        // so ignore it and keep waiting. Function keys are fine on their own.
+        guard !finalMods.isEmpty || Self.isStandaloneKey(event.keyCode) else { return }
+
+        keyPressedWhileRecording = true
         let finalSides = Self.accumulateSides(
             fromRawFlags: UInt64(event.modifierFlags.rawValue),
             mods: eventMods,
@@ -238,8 +236,8 @@ class ShortcutRecorder: NSView {
         if keyCode == 0 {
             currentKeyDisplay = Self.modifierOnlyDisplayName(modifiers, sides: sides)
         }
-        onShortcutChanged?(keyCode, modifiers, sides)
         stopRecording()
+        onShortcutChanged?(keyCode, modifiers, sides)
     }
 
     private func cancelRecording() {
@@ -252,10 +250,19 @@ class ShortcutRecorder: NSView {
         maxModifiersSeen = []
         sidesSeen = 0
         keyPressedWhileRecording = false
-        holdTimer?.invalidate()
-        holdTimer = nil
         removeAllMonitors()
+        if let resignKeyObserver {
+            NotificationCenter.default.removeObserver(resignKeyObserver)
+            self.resignKeyObserver = nil
+        }
+        HotkeyManager.sharedManager?.isCapturingShortcut = false
         setNeedsDisplay(bounds)
+    }
+
+    /// Keys that carry no meaning while typing, so they are safe to bind on their own.
+    private static func isStandaloneKey(_ keyCode: UInt16) -> Bool {
+        let functionKeys: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113]
+        return functionKeys.contains(keyCode)
     }
 
     private func removeAllMonitors() {
@@ -269,8 +276,14 @@ class ShortcutRecorder: NSView {
     }
 
     deinit {
-        holdTimer?.invalidate()
         removeAllMonitors()
+        if let resignKeyObserver {
+            NotificationCenter.default.removeObserver(resignKeyObserver)
+        }
+        // Closing Settings mid-capture must not leave the hotkeys muted.
+        if isRecording {
+            HotkeyManager.sharedManager?.isCapturingShortcut = false
+        }
     }
 
     // MARK: - Side Extraction
@@ -320,7 +333,7 @@ class ShortcutRecorder: NSView {
             let snapshot = maxModifiersSeen.union(liveModifiers)
             var text = Self.modifierOnlyDisplayName(snapshot, sides: sidesSeen)
             if text.isEmpty { text = "Press shortcut..." }
-            else { text += " + key" }
+            else { text += "…" }
             return text
         }
 

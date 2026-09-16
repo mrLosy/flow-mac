@@ -35,6 +35,13 @@ class HotkeyManager: NSObject, ObservableObject, HotkeyManagerProtocol {
     private var expressTimer: Timer?
     private let expressMaxDuration: TimeInterval = 300 // 5 min safety limit
 
+    /// True while the Settings shortcut recorder is capturing a new combo. The event tap
+    /// must stay installed (removing it mid-capture races with the recorder's monitors),
+    /// but it must not act on or swallow anything: otherwise pressing the combo you are
+    /// about to assign fires the *current* hotkey, and a matching key is consumed before
+    /// the recorder ever sees it.
+    var isCapturingShortcut = false
+
     // Modifier-only detection state
     var toggleModOnlyPending = false
     var toggleModOnlyKeyWasPressed = false
