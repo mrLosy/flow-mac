@@ -62,6 +62,21 @@ enum AudioDeviceLookup {
         return deviceID
     }
 
+    /// The device's actual capture format. AVAudioEngine can misreport this for devices
+    /// whose input and output rates differ (Bluetooth headsets); CoreAudio does not.
+    static func inputFormat(of deviceID: AudioDeviceID) -> AudioStreamBasicDescription? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamFormat,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var asbd = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        guard AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &asbd) == noErr,
+              asbd.mSampleRate > 0, asbd.mChannelsPerFrame > 0 else { return nil }
+        return asbd
+    }
+
     /// Whether the device still exists and exposes input streams.
     static func hasInputStreams(_ deviceID: AudioDeviceID) -> Bool {
         var addr = AudioObjectPropertyAddress(
@@ -78,7 +93,7 @@ enum AudioDeviceLookup {
 class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
     @Published var isRecording = false
     @Published var audioLevel: Float = 0.0
-    private let audioEngine = AVAudioEngine()
+    private var audioEngine = AVAudioEngine()
     private let bufferSize: UInt32 = 4096
     private let targetSampleRate: Double = 16000.0 // Whisper optimal sample rate
     private lazy var targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: targetSampleRate, channels: 1, interleaved: true)!
@@ -124,14 +139,18 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
 
     override init() {
         super.init()
+        observeConfigurationChange()
+        installDefaultInputListener()
+        installPermanentTap()
+    }
+
+    private func observeConfigurationChange() {
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleConfigurationChange),
             name: .AVAudioEngineConfigurationChange,
             object: audioEngine
         )
-        installDefaultInputListener()
-        installPermanentTap()
     }
 
     deinit {
@@ -158,22 +177,59 @@ class AudioEngine: NSObject, ObservableObject, AudioCaptureServiceProtocol {
 
     // MARK: - Engine & Tap Lifecycle (one-time setup)
 
-    /// Install tap and start engine once; never tear down during normal operation
-    private func installPermanentTap() {
-        // Rebinding the input unit to another device, or installing a tap whose format
-        // no longer matches the hardware, raises an ObjC exception on a running engine
-        // (uncatchable from Swift). Stop first — the code below starts it again.
+    /// Discard the current engine and build a fresh one.
+    ///
+    /// Reinstalling a tap happens exactly when the graph is least trustworthy: a device
+    /// switch, a wake, a dead tap. Stop/reset leaves the old engine's cached device
+    /// binding and node formats in place; a new instance resolves both from scratch.
+    private func rebuildEngine() {
+        NotificationCenter.default.removeObserver(
+            self, name: .AVAudioEngineConfigurationChange, object: audioEngine
+        )
         if audioEngine.isRunning {
             audioEngine.stop()
         }
-        // After a wake the graph still references the pre-sleep HAL device; reset()
-        // drops that state so the node reports the format the hardware actually has.
-        audioEngine.reset()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        audioEngine = AVAudioEngine()
+        // The fresh engine is bound to the system default, whatever we applied before.
+        lastAppliedDeviceID = ""
+        observeConfigurationChange()
+    }
 
+    /// Make the input node emit the format the microphone actually captures.
+    ///
+    /// On a device whose input and output rates differ — AirPods capture at 24 kHz while
+    /// playing at 48 kHz — AVAudioEngine reports the *output* rate on the input node, so
+    /// the tap goes on at 48 kHz while the graph initializes the hardware at 24 kHz and
+    /// `start()` fails with -10868 ("formats don't match"), forever. CoreAudio reports the
+    /// capture format correctly, so we take it from the device and write it onto the
+    /// AUHAL's output scope, which is what the node and the tap read back.
+    private func alignInputNodeToHardware(_ inputNode: AVAudioInputNode) {
+        guard let deviceID = resolvedInputDevice(),
+              let hwFormat = AudioDeviceLookup.inputFormat(of: deviceID) else { return }
+        let nodeRate = inputNode.outputFormat(forBus: 0).sampleRate
+        guard nodeRate != hwFormat.mSampleRate else { return }
+        guard let inputUnit = inputNode.audioUnit else { return }
+
+        var asbd = hwFormat
+        let status = AudioUnitSetProperty(
+            inputUnit,
+            kAudioUnitProperty_StreamFormat,
+            kAudioUnitScope_Output,
+            1, // input element of the AUHAL
+            &asbd,
+            UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        )
+        DebugLog.log("AUD. realign \(nodeRate) -> \(hwFormat.mSampleRate) Hz status=\(status) now=\(inputNode.outputFormat(forBus: 0).sampleRate)")
+    }
+
+    /// Install tap and start engine once; never tear down during normal operation
+    private func installPermanentTap() {
+        rebuildEngine()
         _ = applySelectedAudioDeviceIfNeeded()
 
         let inputNode = audioEngine.inputNode
-        inputNode.removeTap(onBus: 0)
+        alignInputNodeToHardware(inputNode)
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
         // installTap raises unless both are non-zero. A device mid-switch, or a default
