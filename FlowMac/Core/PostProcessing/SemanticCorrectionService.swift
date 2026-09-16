@@ -149,15 +149,22 @@ final class SemanticCorrectionService {
             return
         }
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "messages": [
                 ["role": "system", "content": category.systemPrompt],
                 ["role": "user", "content": text]
             ],
             "temperature": 0.1,
-            "max_completion_tokens": 1024
+            "max_completion_tokens": Self.completionBudget(for: text)
         ]
+        if provider == .groq {
+            // gpt-oss is a reasoning model and Groq has no non-reasoning production
+            // model left; "low" is the minimum it accepts. Reasoning tokens come out
+            // of max_completion_tokens, so anything higher eats the budget for the
+            // rewrite itself.
+            body["reasoning_effort"] = "low"
+        }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -188,10 +195,26 @@ final class SemanticCorrectionService {
 
             let trimmed = corrected.trimmingCharacters(in: .whitespacesAndNewlines)
 
+            // A cut-off rewrite is not a correction. safeMerge would reject it anyway
+            // on edit distance, but name the cause so it shows up in the log.
+            let finishReason = choices.first?["finish_reason"] as? String
+            if finishReason == "length" || trimmed.isEmpty {
+                NSLog("[FlowMac] Semantic correction discarded (model=\(model), finish_reason=\(finishReason ?? "nil"), \(trimmed.count) chars)")
+                DispatchQueue.main.async { completion(text) }
+                return
+            }
+
             // safeMerge: reject if too many changes (hallucination protection)
             let merged = Self.safeMerge(original: text, corrected: trimmed, maxChangeRatio: 0.25)
             DispatchQueue.main.async { completion(merged) }
         }.resume()
+    }
+
+    /// The answer is a rewrite of the whole input, so the budget must scale with it.
+    /// ~1 token per 2 chars is a safe over-estimate for Russian; the constant covers
+    /// low-effort reasoning. Capped well above the 5-minute express-mode limit.
+    static func completionBudget(for text: String) -> Int {
+        min(8192, text.count + 1024)
     }
 
     /// Reject LLM output if normalized edit distance exceeds threshold
